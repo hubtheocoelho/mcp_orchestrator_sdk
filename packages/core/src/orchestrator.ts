@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { AgentRegistry } from "./agent-registry.js";
 import type { AuditSink } from "./audit.js";
 import {
@@ -99,13 +100,15 @@ export class Orchestrator {
     options: ExecuteOptions = {},
   ): Promise<ToolResult> {
     const caller = options.caller ?? "system";
+    const callId = options.callId ?? randomUUID();
+    const startedAt = Date.now();
 
     if (caller !== "system" && this.agents.has(caller)) {
       const allowed = this.agents.require(caller).allowedTools(this.tools.ids());
       if (!allowed.includes(toolId)) {
         const error = new ToolNotAllowedError(caller, toolId);
         await this.emitError("callTool", error);
-        return { callId: options.callId ?? "", toolId, ok: false, error: error.message, durationMs: 0 };
+        return { callId, toolId, ok: false, error: error.message, durationMs: 0 };
       }
     }
 
@@ -115,13 +118,13 @@ export class Orchestrator {
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       await this.emitError("beforeToolCall", cause);
-      return { callId: options.callId ?? "", toolId, ok: false, error: message, durationMs: 0 };
+      return { callId, toolId, ok: false, error: message, durationMs: 0 };
     }
 
-    const result = await this.tools.execute(toolId, before.params, { ...options, caller });
+    const result = await this.tools.execute(toolId, before.params, { ...options, caller, callId });
 
     const after: AfterToolCallPayload = {
-      call: { callId: result.callId, toolId, caller, params: before.params, startedAt: Date.now() },
+      call: { callId, toolId, caller, params: before.params, startedAt },
       result,
     };
     await this.hooks.emit("afterToolCall", after).catch((cause) => this.emitError("afterToolCall", cause));

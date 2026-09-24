@@ -60,6 +60,40 @@ test("agent allowlist blocks disallowed tools", async () => {
   assert.equal(errors[0] instanceof ToolNotAllowedError, true);
 });
 
+test("vetoed and disallowed calls still carry a non-empty callId", async () => {
+  const orch = new Orchestrator();
+  orch.registerTool(echo);
+  await orch.registerAgent({ id: "reader", tools: ["other"] });
+
+  const disallowed = await orch.callTool("echo", { text: "hi" }, { caller: "reader" });
+  assert.ok(disallowed.callId.length > 0);
+
+  const sub = orch.onBeforeToolCall(() => {
+    throw new Error("denied");
+  });
+  const vetoed = await orch.callTool("echo", { text: "hi" }, { callId: "given-id" });
+  assert.equal(vetoed.callId, "given-id");
+  sub.unsubscribe();
+});
+
+test("afterToolCall reports the call's start time, not its end time", async () => {
+  const orch = new Orchestrator();
+  orch.registerTool({
+    id: "slow",
+    description: "sleeps",
+    schema: { type: "object" },
+    execute: () => new Promise((resolve) => setTimeout(() => resolve("done"), 40)),
+  });
+  let startedAt = 0;
+  let endedAt = 0;
+  orch.onAfterToolCall((p) => {
+    startedAt = p.call.startedAt;
+    endedAt = Date.now();
+  });
+  await orch.callTool("slow", {});
+  assert.ok(endedAt - startedAt >= 35, `expected >=35ms, got ${endedAt - startedAt}`);
+});
+
 test("agentSpawn hook fires on registerAgent", async () => {
   const orch = new Orchestrator();
   let spawned = "";
