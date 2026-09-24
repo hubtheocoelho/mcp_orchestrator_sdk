@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/mcp" },
+    { "path": "packages/state" },
+    { "path": "packages/workflow" },
+    { "path": "packages/reference-impl" },
+    { "path": "examples" }
+  ]
+}

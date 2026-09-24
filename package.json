@@ -1,0 +1,27 @@
+{
+  "name": "mcp-orchestrator-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Modular, type-safe SDK for orchestrating AI agents, tools, MCPs and deterministic workflows",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/*",
+    "examples"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "clean": "tsc --build --clean",
+    "typecheck": "tsc --build",
+    "test": "node --import tsx --test \"packages/**/*.test.ts\"",
+    "example": "tsx"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
