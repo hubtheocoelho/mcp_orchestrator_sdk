@@ -82,6 +82,9 @@ await orchestrator.registerToolProvider(client); // registers "weather.forecast"
 
 ## More
 
-See [`../examples`](../examples) for four runnable programs and
-[`architecture.md`](architecture.md) for the design, and
-[`api-reference.md`](api-reference.md) for the public surface.
+- [`../examples`](../examples): four runnable programs.
+- [`workflows.md`](workflows.md): the full workflow and expression reference.
+- [`extending.md`](extending.md): plug in your own tools, transports and backends.
+- [`security.md`](security.md): read this before exposing tools to an agent.
+- [`architecture.md`](architecture.md) and [`api-reference.md`](api-reference.md):
+  the design and the public surface.

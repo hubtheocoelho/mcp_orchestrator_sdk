@@ -30,9 +30,20 @@ npm test
 - **Composable** — workflows and agents are first-class, declarative values.
 - **Observable** — structured audit trails for every tool and workflow call.
 
-See [`docs/architecture.md`](docs/architecture.md) for the full design and
-[`examples/`](examples) for runnable usage.
+## Documentation
+
+| Guide | Contents |
+|-------|----------|
+| [Getting started](docs/getting-started.md) | Install, first orchestrator, hooks, agents, workflows, MCP |
+| [Architecture](docs/architecture.md) | Package graph, layers and design principles |
+| [Workflow reference](docs/workflows.md) | Definition format, expression syntax, runtime semantics |
+| [Extending](docs/extending.md) | Custom tools, transports, state backends, audit sinks, hooks |
+| [Security model](docs/security.md) | What is enforced, what is not, known limitations |
+| [API reference](docs/api-reference.md) | Public surface of every package |
+| [Examples](examples) | Four runnable programs |
+
+See also the [changelog](CHANGELOG.md) and the [contributing guide](CONTRIBUTING.md).
 
 ## License
 
-MIT
+[MIT](LICENSE)
