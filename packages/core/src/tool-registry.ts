@@ -120,12 +120,19 @@ export class ToolRegistry {
     params: JsonObject,
     options: ExecuteOptions = {},
   ): Promise<ToolResult> {
-    const entry = this.requireTool(toolId);
     const callId = options.callId ?? randomUUID();
     const caller = options.caller ?? "system";
     const startedAt = Date.now();
 
     const call: ToolCall = { callId, toolId, caller, params, startedAt };
+
+    const entry = this.tools.get(toolId);
+    if (!entry) {
+      const error = new ToolNotFoundError(toolId).message;
+      const result: ToolResult = { callId, toolId, ok: false, error, durationMs: 0 };
+      await this.emit(call, result, error);
+      return result;
+    }
 
     const validation = this.validate(toolId, params);
     if (!validation.ok) {

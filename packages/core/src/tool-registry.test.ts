@@ -79,6 +79,15 @@ test("discover registers every tool from a provider", async () => {
   assert.equal(registry.get("test.echo")?.source, "mcp-x");
 });
 
+test("execute returns a failed, audited result for an unknown tool instead of throwing", async () => {
+  const sink = new InMemoryAuditSink();
+  const registry = new ToolRegistry({ auditSinks: [sink] });
+  const result = await registry.execute("nope", {});
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /Tool not found: nope/);
+  assert.equal(sink.all().length, 1);
+});
+
 test("unknown tool ids throw ToolNotFoundError", () => {
   const registry = new ToolRegistry();
   assert.throws(() => registry.getSchema("nope"), ToolNotFoundError);
