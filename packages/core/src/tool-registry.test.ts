@@ -88,6 +88,25 @@ test("execute returns a failed, audited result for an unknown tool instead of th
   assert.equal(sink.all().length, 1);
 });
 
+test("a throwing audit sink does not affect the call result", async () => {
+  const good = new InMemoryAuditSink();
+  const registry = new ToolRegistry({
+    auditSinks: [
+      {
+        record() {
+          throw new Error("sink down");
+        },
+      },
+      good,
+    ],
+  });
+  registry.register(echo);
+  const result = await registry.execute("test.echo", { text: "hi" });
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "hi");
+  assert.equal(good.all().length, 1);
+});
+
 test("unknown tool ids throw ToolNotFoundError", () => {
   const registry = new ToolRegistry();
   assert.throws(() => registry.getSchema("nope"), ToolNotFoundError);

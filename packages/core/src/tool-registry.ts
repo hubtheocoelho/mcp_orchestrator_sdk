@@ -185,7 +185,10 @@ export class ToolRegistry {
 
   private async emit(call: ToolCall, result: ToolResult, error?: string): Promise<void> {
     const recordedAt = Date.now();
-    await Promise.all(this.sinks.map((sink) => sink.record({ call, result, error, recordedAt })));
+    // Auditing is best-effort: a failing sink must never change a call's outcome.
+    await Promise.allSettled(
+      this.sinks.map(async (sink) => sink.record({ call, result, error, recordedAt })),
+    );
   }
 
   private requireTool(toolId: string): RegisteredTool {
