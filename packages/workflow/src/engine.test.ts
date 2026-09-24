@@ -136,6 +136,60 @@ test("on_failure retry re-attempts until success", async () => {
   assert.equal(result.steps[0]?.attempts, 3);
 });
 
+test("on_failure retry fails the run once attempts are exhausted", async () => {
+  const always: ToolDefinition = {
+    id: "always-fails",
+    description: "always throws",
+    schema: { type: "object" },
+    execute: () => {
+      throw new Error("permanent");
+    },
+  };
+  const engine = new WorkflowEngine({ tools: orchestratorWithTools(always, upper) });
+  engine.define({
+    id: "retry-exhausted",
+    steps: [
+      { id: "a", tool: "always-fails", params: {}, on_failure: "retry", retry: { max: 2 } },
+      { id: "b", tool: "str.upper", params: { text: "x" } },
+    ],
+  });
+  const result = await engine.execute("retry-exhausted");
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /Step "a" failed/);
+  assert.equal(result.steps.length, 1);
+  assert.equal(result.steps[0]?.attempts, 2);
+});
+
+test("on_failure skip continues past a failed step", async () => {
+  const boom: ToolDefinition = {
+    id: "boom",
+    description: "throws",
+    schema: { type: "object" },
+    execute: () => {
+      throw new Error("nope");
+    },
+  };
+  const engine = new WorkflowEngine({ tools: orchestratorWithTools(boom, upper) });
+  engine.define({
+    id: "skip-policy",
+    steps: [
+      { id: "a", tool: "boom", params: {}, on_failure: "skip" },
+      { id: "b", tool: "str.upper", params: { text: "x" } },
+    ],
+  });
+  const result = await engine.execute("skip-policy");
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.steps.map((s) => s.status), ["failed", "success"]);
+});
+
+test("unknown tool in a workflow fails the step instead of throwing", async () => {
+  const engine = new WorkflowEngine({ tools: orchestratorWithTools() });
+  engine.define({ id: "ghost-tool", steps: [{ id: "a", tool: "nope", params: {} }] });
+  const result = await engine.execute("ghost-tool");
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /Tool not found/);
+});
+
 test("unknown workflow id throws", async () => {
   const engine = new WorkflowEngine({ tools: orchestratorWithTools() });
   await assert.rejects(() => engine.execute("ghost"), WorkflowNotFoundError);

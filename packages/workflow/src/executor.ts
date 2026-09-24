@@ -75,11 +75,12 @@ export class WorkflowExecutor {
       if (result.status === "success") {
         scope.steps[step.id] = { output: result.output };
         if (step.stop_when && evaluateCondition(step.stop_when, scope)) break;
-      } else if (step.on_failure === "fail") {
+      } else if (step.on_failure !== "skip") {
+        // "fail", and "retry" once its attempts are exhausted, abort the run.
         failure = `Step "${step.id}" failed: ${result.error}`;
         break;
       }
-      // on_failure "skip"/"retry" (already retried) simply continues.
+      // Only on_failure "skip" continues past a failed step.
     }
 
     const outputs = failure ? {} : this.resolveOutputs(definition, scope);
