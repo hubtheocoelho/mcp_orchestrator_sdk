@@ -4,3 +4,4 @@ export * from "./audit.js";
 export * from "./tool-registry.js";
 export * from "./hook-manager.js";
 export * from "./agent-registry.js";
+export * from "./orchestrator.js";
