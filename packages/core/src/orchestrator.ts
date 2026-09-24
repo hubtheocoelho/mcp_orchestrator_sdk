@@ -17,7 +17,8 @@ import type { Agent, AgentConfig, JsonObject, Tool, ToolDefinition, ToolResult }
  */
 export interface StateAccess {
   get(collection: string, id: string): Promise<unknown>;
-  update(collection: string, id: string, patch: JsonObject): Promise<void>;
+  /** Merge `patch` into an entity. The return value (if any) is ignored. */
+  update(collection: string, id: string, patch: JsonObject): Promise<unknown>;
 }
 
 /** Minimal structural view of a workflow runtime the orchestrator can delegate to. */
