@@ -1,0 +1,20 @@
+{
+  "name": "@mcp-orchestrator/examples",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runnable usage examples for the MCP Orchestrator SDK",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "basic-agent": "tsx src/basic-agent.ts",
+    "workflow": "tsx src/workflow-execution.ts",
+    "custom-mcp": "tsx src/custom-mcp.ts",
+    "multi-agent": "tsx src/multi-agent-dispatch.ts"
+  },
+  "dependencies": {
+    "@mcp-orchestrator/core": "0.1.0",
+    "@mcp-orchestrator/mcp": "0.1.0",
+    "@mcp-orchestrator/state": "0.1.0",
+    "@mcp-orchestrator/workflow": "0.1.0"
+  }
+}

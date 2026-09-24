@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "noEmit": false
+  },
+  "references": [
+    { "path": "../packages/core" },
+    { "path": "../packages/mcp" },
+    { "path": "../packages/state" },
+    { "path": "../packages/workflow" }
+  ],
+  "include": ["src/**/*"],
+  "exclude": ["dist"]
+}
