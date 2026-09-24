@@ -73,7 +73,7 @@ import { InMemoryTransport, McpClient } from "@mcp-orchestrator/mcp";
 const client = new McpClient({
   id: "weather",
   transport: new InMemoryTransport({
-    tools: [{ name: "forecast", handler: ({ city }) => ({ city, tempC: 21 }) }],
+    tools: [{ name: "forecast", handler: ({ city }) => ({ city: String(city), tempC: 21 }) }],
   }),
 });
 await client.connect();
