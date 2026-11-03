@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Orchestrator } from "@mcp-orchestrator/core";
 import { McpClient } from "./client.js";
+import { HttpTransport } from "./http-transport.js";
 import { McpPool, McpNotFoundError } from "./pool.js";
 import { InMemoryTransport } from "./transport.js";
 
@@ -175,4 +176,104 @@ test("McpClient dispose is idempotent", async () => {
   await client.dispose();
   await client.dispose(); // second call should not throw
   assert.equal(client.isConnected(), false);
+});
+
+// ---------------------------------------------------------------------------
+// Tarefa 1 — AbortSignal end-to-end
+// ---------------------------------------------------------------------------
+
+test("AbortController.abort() during callTool on HttpTransport rejects in < 100ms with AbortError", async () => {
+  let cancelledNotificationReceived = false;
+  const mockFetch: typeof fetch = async (url, init) => {
+    const urlStr = String(url);
+    if (urlStr.includes("/notifications/cancelled")) {
+      cancelledNotificationReceived = true;
+      return new Response(JSON.stringify({ ok: true }));
+    }
+    // Simulate long running request respecting signal
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        resolve(new Response(JSON.stringify({ result: "done" })));
+      }, 500);
+
+      init?.signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        const err = new DOMException("The operation was aborted", "AbortError");
+        reject(err);
+      });
+    });
+  };
+
+  const transport = new HttpTransport({
+    baseUrl: "http://mock-mcp:8080",
+    fetchImpl: mockFetch,
+  });
+  await transport.start();
+
+  const controller = new AbortController();
+  const start = Date.now();
+
+  setTimeout(() => controller.abort(), 20);
+
+  await assert.rejects(
+    async () => {
+      await transport.callTool("long_op", {}, { signal: controller.signal, requestId: "req-123" });
+    },
+    (err: any) => err.name === "AbortError",
+  );
+
+  const elapsed = Date.now() - start;
+  assert.ok(elapsed < 100, `Expected rejection in < 100ms, took ${elapsed}ms`);
+  assert.equal(cancelledNotificationReceived, true);
+});
+
+test("signal already aborted before call rejects immediately without opening socket", async () => {
+  let socketOpened = false;
+  const mockFetch: typeof fetch = async () => {
+    socketOpened = true;
+    return new Response(JSON.stringify({}));
+  };
+
+  const transport = new HttpTransport({
+    baseUrl: "http://mock-mcp:8080",
+    fetchImpl: mockFetch,
+  });
+  await transport.start();
+
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    async () => {
+      await transport.callTool("op", {}, { signal: controller.signal });
+    },
+    (err: any) => err.name === "AbortError",
+  );
+
+  assert.equal(socketOpened, false);
+});
+
+test("orchestrator.callTool with signal propagates abort down to fetch", async () => {
+  let signalReceived: AbortSignal | undefined;
+  const mockFetch: typeof fetch = async (url, init) => {
+    const urlStr = String(url);
+    if (urlStr.endsWith("/tools")) {
+      return new Response(JSON.stringify([{ name: "remote_tool", inputSchema: { type: "object" } }]));
+    }
+    signalReceived = init?.signal ?? undefined;
+    return new Response(JSON.stringify({ ok: true }));
+  };
+
+  const transport = new HttpTransport({ baseUrl: "http://mock:8080", fetchImpl: mockFetch });
+  const client = new McpClient({ id: "mock", transport });
+  await client.connect();
+
+  const orchestrator = new Orchestrator();
+  await orchestrator.registerToolProvider(client);
+
+  const controller = new AbortController();
+  await orchestrator.callTool("mock.remote_tool", {}, { signal: controller.signal });
+
+  assert.ok(signalReceived, "fetch received signal");
+  assert.equal(signalReceived, controller.signal);
 });

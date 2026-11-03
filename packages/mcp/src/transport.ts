@@ -1,5 +1,5 @@
 import type { JsonObject, JsonValue } from "@mcp-orchestrator/core";
-import type { McpTransport, PromptDescriptor, PromptResult, RemoteToolDescriptor, Resource } from "./types.js";
+import type { McpCallOptions, McpTransport, PromptDescriptor, PromptResult, RemoteToolDescriptor, Resource } from "./types.js";
 
 /** A single tool served by an {@link InMemoryTransport}. */
 export interface InMemoryTool extends RemoteToolDescriptor {
@@ -38,16 +38,25 @@ export class InMemoryTransport implements McpTransport {
     for (const prompt of options.prompts ?? []) this.prompts.set(prompt.name, prompt);
   }
 
-  async start(): Promise<void> {
+  async start(options?: { signal?: AbortSignal }): Promise<void> {
+    if (options?.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
     this.started = true;
   }
 
-  async close(): Promise<void> {
+  async close(options?: { signal?: AbortSignal }): Promise<void> {
+    if (options?.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
     this.started = false;
   }
 
-  async listTools(): Promise<RemoteToolDescriptor[]> {
+  async listTools(options?: { signal?: AbortSignal }): Promise<RemoteToolDescriptor[]> {
     this.assertStarted();
+    if (options?.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
     return [...this.tools.values()].map(({ name, description, inputSchema }) => ({
       name,
       description,
@@ -55,27 +64,39 @@ export class InMemoryTransport implements McpTransport {
     }));
   }
 
-  async callTool(name: string, args: JsonObject): Promise<JsonValue> {
+  async callTool(name: string, args: JsonObject, options?: McpCallOptions): Promise<JsonValue> {
     this.assertStarted();
+    if (options?.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
     const tool = this.tools.get(name);
     if (!tool) throw new Error(`Unknown MCP tool: ${name}`);
     return tool.handler(args);
   }
 
-  async listResources(): Promise<Resource[]> {
+  async listResources(options?: { signal?: AbortSignal }): Promise<Resource[]> {
     this.assertStarted();
+    if (options?.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
     return [...this.resources.values()].map(({ uri, name, mimeType }) => ({ uri, name, mimeType }));
   }
 
-  async readResource(uri: string): Promise<string> {
+  async readResource(uri: string, options?: { signal?: AbortSignal }): Promise<string> {
     this.assertStarted();
+    if (options?.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
     const resource = this.resources.get(uri);
     if (!resource) throw new Error(`Unknown MCP resource: ${uri}`);
     return resource.read();
   }
 
-  async listPrompts(): Promise<PromptDescriptor[]> {
+  async listPrompts(options?: { signal?: AbortSignal }): Promise<PromptDescriptor[]> {
     this.assertStarted();
+    if (options?.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
     return [...this.prompts.values()].map(({ name, description, arguments: args }) => ({
       name,
       description,
@@ -83,8 +104,11 @@ export class InMemoryTransport implements McpTransport {
     }));
   }
 
-  async getPrompt(name: string, args?: JsonObject): Promise<PromptResult> {
+  async getPrompt(name: string, args?: JsonObject, options?: { signal?: AbortSignal }): Promise<PromptResult> {
     this.assertStarted();
+    if (options?.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
     const prompt = this.prompts.get(name);
     if (!prompt) throw new Error(`Unknown MCP prompt: ${name}`);
     return prompt.handler(args);

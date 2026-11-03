@@ -7,6 +7,7 @@ import type {
 } from "@mcp-orchestrator/core";
 import type {
   CompletionResult,
+  McpCallOptions,
   McpTransport,
   PromptDescriptor,
   PromptResult,
@@ -60,15 +61,15 @@ export class McpClient implements ToolProvider {
     this._onProgress = options.onProgress;
   }
 
-  async connect(): Promise<void> {
+  async connect(options?: { signal?: AbortSignal }): Promise<void> {
     if (this.connected) return;
-    await this.transport.start();
+    await this.transport.start(options);
     this.connected = true;
   }
 
-  async disconnect(): Promise<void> {
+  async disconnect(options?: { signal?: AbortSignal }): Promise<void> {
     if (!this.connected) return;
-    await this.transport.close();
+    await this.transport.close(options);
     this.connected = false;
   }
 
@@ -79,15 +80,15 @@ export class McpClient implements ToolProvider {
   // --- Tools --------------------------------------------------------------
 
   /** Raw remote tool descriptors, as advertised by the server. */
-  async getTools(): Promise<RemoteToolDescriptor[]> {
+  async getTools(options?: { signal?: AbortSignal }): Promise<RemoteToolDescriptor[]> {
     this.assertConnected();
-    return this.transport.listTools();
+    return this.transport.listTools(options);
   }
 
   /** Call a remote tool by its un-namespaced name. */
-  async callTool(toolName: string, params: JsonObject): Promise<JsonValue> {
+  async callTool(toolName: string, params: JsonObject, options?: McpCallOptions): Promise<JsonValue> {
     this.assertConnected();
-    return this.transport.callTool(toolName, params);
+    return this.transport.callTool(toolName, params, options);
   }
 
   // --- Resources ----------------------------------------------------------
@@ -185,7 +186,11 @@ export class McpClient implements ToolProvider {
       id: this.namespace(this.id, descriptor.name),
       description: descriptor.description ?? `MCP tool ${descriptor.name} from ${this.id}`,
       schema,
-      execute: (params) => this.callTool(descriptor.name, params),
+      execute: (params, context) =>
+        this.callTool(descriptor.name, params, {
+          signal: context?.signal,
+          requestId: context?.callId,
+        }),
     };
   }
 

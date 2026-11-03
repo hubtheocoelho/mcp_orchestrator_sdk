@@ -76,6 +76,13 @@ export interface ProgressNotification {
   readonly total?: number;
 }
 
+/** Options passed to transport calls. */
+export interface McpCallOptions {
+  readonly signal?: AbortSignal;
+  readonly requestId?: string;
+  readonly onProgress?: (notification: ProgressNotification) => void;
+}
+
 /**
  * A transport is the only thing that knows *how* an MCP is reached — in-process,
  * stdio, HTTP, WebSocket, etc. The client and pool are written entirely against
@@ -83,17 +90,17 @@ export interface ProgressNotification {
  */
 export interface McpTransport {
   /** Establish the connection / start the server process. */
-  start(): Promise<void>;
+  start(options?: { signal?: AbortSignal }): Promise<void>;
   /** Tear the connection down. */
-  close(): Promise<void>;
+  close(options?: { signal?: AbortSignal }): Promise<void>;
   /** List the tools the remote exposes. */
-  listTools(): Promise<RemoteToolDescriptor[]>;
+  listTools(options?: { signal?: AbortSignal }): Promise<RemoteToolDescriptor[]>;
   /** Invoke a remote tool by its (un-namespaced) name. */
-  callTool(name: string, args: JsonObject): Promise<JsonValue>;
+  callTool(name: string, args: JsonObject, options?: McpCallOptions): Promise<JsonValue>;
   /** Optional resource support. */
-  listResources?(): Promise<Resource[]>;
-  readResource?(uri: string): Promise<string>;
+  listResources?(options?: { signal?: AbortSignal }): Promise<Resource[]>;
+  readResource?(uri: string, options?: { signal?: AbortSignal }): Promise<string>;
   /** Optional prompt support. */
-  listPrompts?(): Promise<PromptDescriptor[]>;
-  getPrompt?(name: string, args?: JsonObject): Promise<PromptResult>;
+  listPrompts?(options?: { signal?: AbortSignal }): Promise<PromptDescriptor[]>;
+  getPrompt?(name: string, args?: JsonObject, options?: { signal?: AbortSignal }): Promise<PromptResult>;
 }

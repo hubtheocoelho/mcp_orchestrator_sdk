@@ -34,7 +34,7 @@
 // ---------------------------------------------------------------
 
 import type { JsonObject, JsonValue } from "@mcp-orchestrator/core";
-import type { McpTransport, RemoteToolDescriptor, Resource } from "./types.js";
+import type { McpCallOptions, McpTransport, RemoteToolDescriptor, Resource } from "./types.js";
 
 export interface HttpTransportOptions {
   /** Base URL of the remote MCP HTTP server, e.g. "http://localhost:8080" */
@@ -63,12 +63,18 @@ export class HttpTransport implements McpTransport {
   }
 
   /** No external resources to allocate; mark the transport as ready. */
-  async start(): Promise<void> {
+  async start(options?: { signal?: AbortSignal }): Promise<void> {
+    if (options?.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
     this.started = true;
   }
 
   /** No persistent connections; simply toggle the flag. */
-  async close(): Promise<void> {
+  async close(options?: { signal?: AbortSignal }): Promise<void> {
+    if (options?.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
     this.started = false;
   }
 
@@ -81,9 +87,12 @@ export class HttpTransport implements McpTransport {
   // -------------------------------------------------------------------
   // Tool‑related methods
   // -------------------------------------------------------------------
-  async listTools(): Promise<RemoteToolDescriptor[]> {
+  async listTools(options?: { signal?: AbortSignal }): Promise<RemoteToolDescriptor[]> {
     this.assertStarted();
-    const resp = await this.fetch(`${this.baseUrl}/tools`);
+    if (options?.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
+    const resp = await this.fetch(`${this.baseUrl}/tools`, { signal: options?.signal });
     if (!resp.ok) {
       throw new Error(`Failed to list tools: ${resp.status} ${resp.statusText}`);
     }
@@ -92,28 +101,63 @@ export class HttpTransport implements McpTransport {
     return tools;
   }
 
-  async callTool(name: string, args: JsonObject): Promise<JsonValue> {
+  async callTool(name: string, args: JsonObject, options?: McpCallOptions): Promise<JsonValue> {
     this.assertStarted();
-    const resp = await this.fetch(`${this.baseUrl}/tools/${encodeURIComponent(name)}/call`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ args }),
-    });
-    if (!resp.ok) {
-      throw new Error(
-        `Tool call failed (${name}): ${resp.status} ${resp.statusText}`,
-      );
+    const signal = options?.signal;
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
     }
-    // The server returns the tool's result as JSON.
-    return (await resp.json()) as JsonValue;
+
+    const requestId = options?.requestId;
+    let onAbort: (() => void) | undefined;
+
+    if (signal && requestId) {
+      onAbort = () => {
+        // Send notifications/cancelled fire-and-forget
+        this.fetch(`${this.baseUrl}/notifications/cancelled`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId } }),
+        }).catch(() => {
+          /* best effort */
+        });
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    try {
+      const resp = await this.fetch(`${this.baseUrl}/tools/${encodeURIComponent(name)}/call`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(requestId ? { "X-Request-Id": requestId } : {}),
+        },
+        body: JSON.stringify({ args, requestId }),
+        signal,
+      });
+      if (!resp.ok) {
+        throw new Error(
+          `Tool call failed (${name}): ${resp.status} ${resp.statusText}`,
+        );
+      }
+      // The server returns the tool's result as JSON.
+      return (await resp.json()) as JsonValue;
+    } finally {
+      if (signal && onAbort) {
+        signal.removeEventListener("abort", onAbort);
+      }
+    }
   }
 
   // -------------------------------------------------------------------
   // Resource‑related methods
   // -------------------------------------------------------------------
-  async listResources(): Promise<Resource[]> {
+  async listResources(options?: { signal?: AbortSignal }): Promise<Resource[]> {
     this.assertStarted();
-    const resp = await this.fetch(`${this.baseUrl}/resources`);
+    if (options?.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
+    const resp = await this.fetch(`${this.baseUrl}/resources`, { signal: options?.signal });
     if (!resp.ok) {
       throw new Error(
         `Failed to list resources: ${resp.status} ${resp.statusText}`,
@@ -123,10 +167,14 @@ export class HttpTransport implements McpTransport {
     return resources;
   }
 
-  async readResource(uri: string): Promise<string> {
+  async readResource(uri: string, options?: { signal?: AbortSignal }): Promise<string> {
     this.assertStarted();
+    if (options?.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
     const resp = await this.fetch(
       `${this.baseUrl}/resources/${encodeURIComponent(uri)}`,
+      { signal: options?.signal },
     );
     if (!resp.ok) {
       throw new Error(
