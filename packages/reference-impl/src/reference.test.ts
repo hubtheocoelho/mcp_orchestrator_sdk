@@ -67,3 +67,8 @@ test("tool calls are audited through the assembled orchestrator", async () => {
   assert.equal(toolAudit.all().length, 1);
   assert.equal(toolAudit.all()[0]?.call.toolId, "filesystem.list_files");
 });
+
+test("runHarness executes successfully with streaming and dispose", async () => {
+  const { runHarness } = await import("./harness.js");
+  await assert.doesNotReject(() => runHarness({ filesystemRoot: root }));
+});

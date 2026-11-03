@@ -8,6 +8,7 @@ import {
 import { filesystemDomain } from "./domains/filesystem.js";
 
 export * from "./domains/filesystem.js";
+export * from "./harness.js";
 
 export interface ReferenceOrchestratorOptions {
   /** Sandbox root for the filesystem domain. Omit to skip that domain. */

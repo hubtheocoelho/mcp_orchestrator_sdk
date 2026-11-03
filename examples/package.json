@@ -9,7 +9,11 @@
     "basic-agent": "tsx src/basic-agent.ts",
     "workflow": "tsx src/workflow-execution.ts",
     "custom-mcp": "tsx src/custom-mcp.ts",
-    "multi-agent": "tsx src/multi-agent-dispatch.ts"
+    "multi-agent": "tsx src/multi-agent-dispatch.ts",
+    "example:basic": "tsx src/01-basic.ts",
+    "example:streaming": "tsx src/02-streaming.ts",
+    "example:cancellation": "tsx src/03-cancellation.ts",
+    "example:tracing": "tsx src/04-tracing.ts"
   },
   "dependencies": {
     "@mcp-orchestrator/core": "0.1.0",
