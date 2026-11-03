@@ -3,7 +3,7 @@
 // It is additive and does not affect existing APIs.
 
 export type OrchestratorEvent =
-  | { type: "workflow.started"; workflowId: string; input: unknown }
+  | { type: "workflow.started"; workflowId: string; input: unknown; resumed?: boolean; fromStep?: number }
   | { type: "step.started"; stepName: string; tool?: string }
   | { type: "step.progress"; stepName: string; progress: number; message?: string }
   | { type: "step.output"; stepName: string; output: unknown }

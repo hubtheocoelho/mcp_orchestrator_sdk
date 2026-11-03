@@ -11,7 +11,8 @@ export interface WorkflowCheckpoint {
 /** Abstract storage backend for workflow checkpoints. */
 export interface CheckpointStore {
   save(checkpoint: WorkflowCheckpoint): Promise<void>;
-  load(workflowId: string): Promise<WorkflowCheckpoint | undefined>;
+  load(workflowId: string): Promise<WorkflowCheckpoint | null>;
+  clear(workflowId?: string): Promise<void>;
   delete?(workflowId: string): Promise<void>;
 }
 
@@ -23,16 +24,20 @@ export class InMemoryCheckpointStore implements CheckpointStore {
     this.store.set(checkpoint.workflowId, { ...checkpoint });
   }
 
-  async load(workflowId: string): Promise<WorkflowCheckpoint | undefined> {
+  async load(workflowId: string): Promise<WorkflowCheckpoint | null> {
     const cp = this.store.get(workflowId);
-    return cp ? { ...cp } : undefined;
+    return cp ? { ...cp } : null;
+  }
+
+  async clear(workflowId?: string): Promise<void> {
+    if (workflowId) {
+      this.store.delete(workflowId);
+    } else {
+      this.store.clear();
+    }
   }
 
   async delete(workflowId: string): Promise<void> {
-    this.store.delete(workflowId);
-  }
-
-  clear(): void {
-    this.store.clear();
+    await this.clear(workflowId);
   }
 }
