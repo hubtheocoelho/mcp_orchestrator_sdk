@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { JsonObject } from "@mcp-orchestrator/core";
+import { NoopTracer, type JsonObject, type Tracer } from "@mcp-orchestrator/core";
 import type { WorkflowAuditSink } from "./audit.js";
+import type { CheckpointStore, WorkflowCheckpoint } from "./checkpoint.js";
 import {
   evaluateCondition,
   interpolate,
@@ -21,39 +22,58 @@ export class WorkflowInputError extends Error {
 export interface ExecutorOptions {
   tools: ToolCaller;
   auditSinks?: WorkflowAuditSink[];
+  tracer?: Tracer;
 }
 
 /**
  * Runs a validated {@link WorkflowDefinition} step by step against a
  * {@link ToolCaller}: applies input defaults, evaluates `when`/`stop_when`
- * gates, interpolates params, enforces on-failure policies (fail/skip/retry)
- * and emits an audit event for each stage.
+ * gates, interpolates params, enforces on-failure policies (fail/skip/retry/continue),
+ * supports parallel steps, checkpoints for resume, and instruments spans via Tracer.
  */
 export class WorkflowExecutor {
   private readonly tools: ToolCaller;
   private readonly sinks: WorkflowAuditSink[];
+  private readonly tracer: Tracer;
 
   constructor(options: ExecutorOptions) {
     this.tools = options.tools;
     this.sinks = options.auditSinks ?? [];
+    this.tracer = options.tracer ?? NoopTracer;
   }
 
   async execute(
     definition: WorkflowDefinition,
     rawInputs: JsonObject = {},
     context: ExecutionContext = {},
+    startIndex = 0,
+    restoredScope?: ExpressionScope,
   ): Promise<WorkflowResult> {
     const runId = context.runId ?? randomUUID();
     const startedAt = Date.now();
+    const tracer = context.tracer ?? this.tracer;
+
+    const workflowSpan = tracer.startSpan("workflow.execute", {
+      "workflow.id": definition.id,
+      "run.id": runId,
+    });
+
     const input = this.resolveInputs(definition, rawInputs);
-    const scope: ExpressionScope = { input, steps: {} };
+    const scope: ExpressionScope = restoredScope ?? { input, steps: {} };
     const steps: StepResult[] = [];
 
     await this.emit({ type: "run-start", runId, workflowId: definition.id, at: Date.now() });
 
     let failure: string | undefined;
 
-    for (const step of definition.steps) {
+    for (let i = startIndex; i < definition.steps.length; i++) {
+      const step = definition.steps[i]!;
+
+      if (context.signal?.aborted) {
+        failure = `Workflow aborted`;
+        break;
+      }
+
       if (step.when && !evaluateCondition(step.when, scope)) {
         const skipped: StepResult = {
           id: step.id,
@@ -68,22 +88,71 @@ export class WorkflowExecutor {
       }
 
       await this.emit({ type: "step-start", runId, stepId: step.id, toolId: step.tool, at: Date.now() });
+
+      const stepSpan = tracer.startSpan(`workflow.step.${step.id}`, {
+        "workflow.id": definition.id,
+        "step.name": step.id,
+        "tool.name": step.tool,
+      });
+
       const result = await this.runStep(step, scope, context, runId);
       steps.push(result);
+
+      stepSpan.setAttribute("workflow.id", definition.id);
+      stepSpan.setAttribute("step.name", step.id);
+      stepSpan.setAttribute("tool.name", step.tool);
+      stepSpan.setAttribute("step.status", result.status);
+      stepSpan.setAttribute("step.duration_ms", result.durationMs);
+
+      if (result.status === "failed" && result.error) {
+        stepSpan.recordException(new Error(result.error));
+      }
+      stepSpan.end();
+
       await this.emit({ type: "step-complete", runId, step: result, at: Date.now() });
+
+      const policy = step.onError ?? step.on_failure;
 
       if (result.status === "success") {
         scope.steps[step.id] = { output: result.output };
+        if (context.checkpointStore) {
+          await context.checkpointStore.save({
+            workflowId: definition.id,
+            stepIndex: i + 1,
+            state: JSON.parse(JSON.stringify(scope)),
+            timestamp: Date.now(),
+          });
+        }
         if (step.stop_when && evaluateCondition(step.stop_when, scope)) break;
-      } else if (step.on_failure !== "skip") {
-        // "fail", and "retry" once its attempts are exhausted, abort the run.
+      } else if (policy === "skip") {
+        // "skip" continues past a failed step without failing the workflow
+      } else if (policy === "continue") {
+        // "continue" continues past a failed step, but reports failure at the end
+        failure = failure ?? `Step "${step.id}" failed: ${result.error}`;
+      } else {
+        // "fail", and "retry" once exhausted, abort the run.
         failure = `Step "${step.id}" failed: ${result.error}`;
+        if (context.checkpointStore) {
+          await context.checkpointStore.save({
+            workflowId: definition.id,
+            stepIndex: i,
+            state: JSON.parse(JSON.stringify(scope)),
+            timestamp: Date.now(),
+          });
+        }
         break;
       }
-      // Only on_failure "skip" continues past a failed step.
     }
 
-    const outputs = failure ? {} : this.resolveOutputs(definition, scope);
+    if (failure) {
+      workflowSpan.recordException(new Error(failure));
+    }
+    workflowSpan.end();
+
+    const outputs = failure && definition.steps.some(s => s.onError !== "continue" && s.on_failure !== "continue")
+      ? {}
+      : this.resolveOutputs(definition, scope);
+
     const result: WorkflowResult = {
       workflowId: definition.id,
       runId,
@@ -93,8 +162,30 @@ export class WorkflowExecutor {
       durationMs: Date.now() - startedAt,
       error: failure,
     };
+
     await this.emit({ type: "run-complete", runId, result, at: Date.now() });
     return result;
+  }
+
+  /**
+   * Resume workflow execution from the last saved checkpoint in `checkpointStore`.
+   */
+  async resume(
+    definition: WorkflowDefinition,
+    checkpointStore: CheckpointStore,
+    context: ExecutionContext = {},
+  ): Promise<WorkflowResult> {
+    const checkpoint = await checkpointStore.load(definition.id);
+    if (!checkpoint) {
+      return this.execute(definition, {}, { ...context, checkpointStore });
+    }
+    return this.execute(
+      definition,
+      checkpoint.state.input,
+      { ...context, checkpointStore },
+      checkpoint.stepIndex,
+      checkpoint.state,
+    );
   }
 
   private async runStep(
@@ -104,9 +195,44 @@ export class WorkflowExecutor {
     runId: string,
   ): Promise<StepResult> {
     const params = interpolateParams(step.params as JsonObject, scope);
-    const maxAttempts = step.on_failure === "retry" ? Math.max(1, step.retry?.max ?? 1) : 1;
+    const policy = step.onError ?? step.on_failure;
+    const maxAttempts = policy === "retry" ? Math.max(1, step.retry?.max ?? 1) : 1;
     const delayMs = step.retry?.delayMs ?? 0;
     const startedAt = Date.now();
+
+    // Support parallel step execution if step.parallel is defined
+    if (step.parallel && step.parallel.length > 0) {
+      const outcomes = await Promise.all(
+        step.parallel.map((toolName, idx) =>
+          this.tools.callTool(toolName, params, {
+            caller: context.caller,
+            callId: `${runId}:${step.id}:${toolName}:${idx}`,
+            signal: context.signal,
+          }),
+        ),
+      );
+
+      const failedOutcome = outcomes.find((o) => !o.ok);
+      if (failedOutcome) {
+        return {
+          id: step.id,
+          toolId: step.tool,
+          status: "failed",
+          error: failedOutcome.error ?? "Parallel execution failed",
+          attempts: 1,
+          durationMs: Date.now() - startedAt,
+        };
+      }
+
+      return {
+        id: step.id,
+        toolId: step.tool,
+        status: "success",
+        output: outcomes.map((o) => o.output),
+        attempts: 1,
+        durationMs: Date.now() - startedAt,
+      };
+    }
 
     let lastError = "unknown error";
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {

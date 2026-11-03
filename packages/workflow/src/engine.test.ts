@@ -227,3 +227,184 @@ test("executor can be used directly with any ToolCaller", async () => {
   );
   assert.equal(result.outputs.o, "hi");
 });
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Tracing in WorkflowExecutor
+// ---------------------------------------------------------------------------
+
+test("workflow with 3 steps generates exactly 4 spans (1 root + 3 steps), all with end() called", async () => {
+  interface RecordedSpan {
+    name: string;
+    attributes: Record<string, unknown>;
+    ended: boolean;
+  }
+  const spans: RecordedSpan[] = [];
+
+  const fakeTracer = {
+    startSpan(name: string, attributes: Record<string, unknown> = {}) {
+      const spanRecord: RecordedSpan = { name, attributes: { ...attributes }, ended: false };
+      spans.push(spanRecord);
+      return {
+        setAttribute(k: string, v: unknown) { spanRecord.attributes[k] = v; },
+        recordException() {},
+        end() { spanRecord.ended = true; },
+      };
+    },
+  };
+
+  const executor = new WorkflowExecutor({
+    tools: { callTool: async (_id, params) => ({ ok: true, output: params.text }) },
+    tracer: fakeTracer,
+  });
+
+  const def = {
+    id: "trace-wf",
+    inputs: {},
+    steps: [
+      { id: "s1", tool: "x", params: { text: "1" }, on_failure: "fail" as const },
+      { id: "s2", tool: "x", params: { text: "2" }, on_failure: "fail" as const },
+      { id: "s3", tool: "x", params: { text: "3" }, on_failure: "fail" as const },
+    ],
+    outputs: {},
+  };
+
+  const result = await executor.execute(def);
+  assert.equal(result.ok, true);
+  assert.equal(spans.length, 4);
+  assert.equal(spans[0]?.name, "workflow.execute");
+  assert.equal(spans[1]?.name, "workflow.step.s1");
+  assert.equal(spans[2]?.name, "workflow.step.s2");
+  assert.equal(spans[3]?.name, "workflow.step.s3");
+  assert.ok(spans.every((s) => s.ended));
+});
+
+// ---------------------------------------------------------------------------
+// Phase 6 — Hardened Runtime: Parallel steps, Checkpoint/Resume, onError
+// ---------------------------------------------------------------------------
+
+test("workflow with 2 parallel steps executes in approx max(t1, t2), not sum", async () => {
+  const executor = new WorkflowExecutor({
+    tools: {
+      callTool: async (id, _params) => {
+        const delay = id === "slow1" ? 60 : 70;
+        await new Promise((r) => setTimeout(r, delay));
+        return { ok: true, output: id };
+      },
+    },
+  });
+
+  const start = Date.now();
+  const result = await executor.execute({
+    id: "parallel-wf",
+    inputs: {},
+    steps: [
+      {
+        id: "p-step",
+        tool: "slow1",
+        parallel: ["slow1", "slow2"],
+        params: {},
+        on_failure: "fail",
+      },
+    ],
+    outputs: {},
+  });
+
+  const elapsed = Date.now() - start;
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.steps[0]?.output, ["slow1", "slow2"]);
+  // If run in series it would take >= 130ms. In parallel it should take < 115ms.
+  assert.ok(elapsed < 120, `Expected parallel execution under 120ms, took ${elapsed}ms`);
+});
+
+test("workflow that fails on step 3 can be resumed from step 3 with checkpoint", async () => {
+  const { InMemoryCheckpointStore } = await import("./checkpoint.js");
+  const checkpointStore = new InMemoryCheckpointStore();
+  let step3ShouldFail = true;
+
+  const executor = new WorkflowExecutor({
+    tools: {
+      callTool: async (id, params) => {
+        if (id === "fail3" && step3ShouldFail) {
+          return { ok: false, error: "Step 3 transient error" };
+        }
+        return { ok: true, output: params.val ?? id };
+      },
+    },
+  });
+
+  const def = {
+    id: "checkpoint-wf",
+    inputs: {},
+    steps: [
+      { id: "step1", tool: "t1", params: { val: "out1" }, on_failure: "fail" as const },
+      { id: "step2", tool: "t2", params: { val: "out2" }, on_failure: "fail" as const },
+      { id: "step3", tool: "fail3", params: { val: "out3" }, on_failure: "fail" as const },
+      { id: "step4", tool: "t4", params: { val: "out4" }, on_failure: "fail" as const },
+    ],
+    outputs: {
+      s1: "${steps.step1.output}",
+      s2: "${steps.step2.output}",
+      s3: "${steps.step3.output}",
+      s4: "${steps.step4.output}",
+    },
+  };
+
+  // Run 1: step 3 fails
+  const initialResult = await executor.execute(def, {}, { checkpointStore });
+  assert.equal(initialResult.ok, false);
+  assert.equal(initialResult.steps.length, 3);
+  assert.equal(initialResult.steps[2]?.status, "failed");
+
+  // Checkpoint was saved at step 3 index (index 2)
+  const savedCp = await checkpointStore.load("checkpoint-wf");
+  assert.ok(savedCp);
+  assert.equal(savedCp.stepIndex, 2);
+  assert.equal((savedCp.state.steps as any).step1?.output, "out1");
+  assert.equal((savedCp.state.steps as any).step2?.output, "out2");
+
+  // Run 2: Fix issue and resume
+  step3ShouldFail = false;
+  const resumedResult = await executor.resume(def, checkpointStore);
+  assert.equal(resumedResult.ok, true);
+  assert.equal(resumedResult.outputs.s1, "out1");
+  assert.equal(resumedResult.outputs.s2, "out2");
+  assert.equal(resumedResult.outputs.s3, "out3");
+  assert.equal(resumedResult.outputs.s4, "out4");
+});
+
+test("onError: 'continue' proceeds and reports failure in final result", async () => {
+  const executor = new WorkflowExecutor({
+    tools: {
+      callTool: async (id, params) => {
+        if (id === "fail-tool") return { ok: false, error: "Non-fatal error" };
+        return { ok: true, output: params.val ?? "ok" };
+      },
+    },
+  });
+
+  const def = {
+    id: "continue-wf",
+    inputs: {},
+    steps: [
+      { id: "s1", tool: "ok-tool", params: { val: "step1" }, onError: "continue" as const, on_failure: "fail" as const },
+      { id: "s2", tool: "fail-tool", params: {}, onError: "continue" as const, on_failure: "fail" as const },
+      { id: "s3", tool: "ok-tool", params: { val: "step3" }, onError: "continue" as const, on_failure: "fail" as const },
+    ],
+    outputs: {
+      first: "${steps.s1.output}",
+      third: "${steps.s3.output}",
+    },
+  };
+
+  const result = await executor.execute(def);
+  // All 3 steps were attempted
+  assert.equal(result.steps.length, 3);
+  assert.equal(result.steps[0]?.status, "success");
+  assert.equal(result.steps[1]?.status, "failed");
+  assert.equal(result.steps[2]?.status, "success");
+  // Final workflow result reports failure, but intermediate outputs resolved
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /Step "s2" failed/);
+  assert.equal(result.outputs.first, "step1");
+  assert.equal(result.outputs.third, "step3");
+});

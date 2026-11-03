@@ -77,3 +77,13 @@ test("works as an Orchestrator state backend", async () => {
   await orch.updateState("workspace", "w1", { branch: "main" });
   assert.deepEqual(await orch.getState("workspace", "w1"), { id: "w1", branch: "main" });
 });
+
+test("dispose clears watchers and is idempotent", async () => {
+  const state = new StateManager();
+  let called = 0;
+  state.watch("items", "i1", () => { called++; });
+  await state.dispose();
+  await state.dispose(); // idempotent
+  await state.set("items", "i1", { id: "i1", val: 1 });
+  assert.equal(called, 0);
+});

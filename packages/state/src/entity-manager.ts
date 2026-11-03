@@ -21,6 +21,7 @@ export class StateManager {
   private readonly backend: StateBackend;
   private readonly globalHandlers = new Set<ChangeHandler>();
   private readonly watchers = new Map<string, Set<ChangeHandler>>();
+  private disposed = false;
 
   constructor(backend: StateBackend = new InMemoryBackend()) {
     this.backend = backend;
@@ -112,9 +113,27 @@ export class StateManager {
   }
 
   private emit(event: StateChangeEvent): void {
+    if (this.disposed) return;
     for (const handler of [...this.globalHandlers]) handler(event);
     const key = `${event.collection}\u0000${event.id}`;
     for (const handler of [...(this.watchers.get(key) ?? [])]) handler(event);
+  }
+
+  // --- Lifecycle ----------------------------------------------------------
+
+  /**
+   * Gracefully dispose the state manager, clearing active watchers and listeners.
+   * Idempotent — calling dispose() twice is safe.
+   */
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.globalHandlers.clear();
+    this.watchers.clear();
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.dispose();
   }
 }
 

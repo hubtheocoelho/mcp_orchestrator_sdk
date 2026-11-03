@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-/** Policy applied when a step fails. */
-export const onFailureSchema = z.enum(["fail", "skip", "retry"]).default("fail");
+/** Policy applied when a step fails: fail the run, skip silently, retry, or continue with failure reported at end. */
+export const onFailureSchema = z.enum(["fail", "skip", "retry", "continue"]).default("fail");
 
 /** Retry configuration for steps with `on_failure: "retry"`. */
 export const retrySchema = z.object({
@@ -10,10 +10,10 @@ export const retrySchema = z.object({
   delayMs: z.number().int().nonnegative().default(0),
 });
 
-/** A single workflow step: call one tool, gated by optional conditions. */
+/** A single workflow step: call one tool (or parallel tools), gated by optional conditions. */
 export const workflowStepSchema = z.object({
   id: z.string().min(1),
-  /** Tool id to invoke. */
+  /** Tool id to invoke. When parallel tools are specified, this acts as the primary tool or identifier. */
   tool: z.string().min(1),
   /** Parameters, possibly containing `${...}` interpolation templates. */
   params: z.record(z.unknown()).default({}),
@@ -22,6 +22,10 @@ export const workflowStepSchema = z.object({
   /** After the step, stop the workflow early when this expression is truthy. */
   stop_when: z.string().optional(),
   on_failure: onFailureSchema,
+  /** Alias / unified nomenclature for on_failure ("fail" | "skip" | "retry" | "continue"). */
+  onError: onFailureSchema.optional(),
+  /** Parallel tool ids to invoke simultaneously during this step. */
+  parallel: z.array(z.string()).optional(),
   retry: retrySchema.optional(),
 });
 

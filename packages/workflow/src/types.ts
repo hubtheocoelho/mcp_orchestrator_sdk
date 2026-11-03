@@ -1,4 +1,5 @@
-import type { JsonObject } from "@mcp-orchestrator/core";
+import type { JsonObject, Tracer } from "@mcp-orchestrator/core";
+import type { CheckpointStore } from "./checkpoint.js";
 
 /** Outcome of a single step within a workflow run. */
 export interface StepResult {
@@ -43,4 +44,8 @@ export interface ExecutionContext {
   /** Who is running the workflow (propagated as the tool caller). */
   caller?: string;
   signal?: AbortSignal;
+  /** Optional tracer for observing execution steps. */
+  tracer?: Tracer;
+  /** Optional store for durable execution checkpoints. */
+  checkpointStore?: CheckpointStore;
 }
