@@ -62,6 +62,24 @@ Tool descriptors and outputs returned by a remote MCP are data from a third
 party. Don't treat descriptions or outputs as instructions, and validate
 outputs before acting on them.
 
+### Sampling requests and LLM delegation
+
+When an MCP server sends a `sampling/createMessage` request to the client, it asks the client to execute an LLM call on its behalf:
+- **Prompt Injection:** Server-provided sampling messages must be treated as untrusted input. Do not grant high-privilege tools or sensitive system prompts to completions requested by untrusted servers.
+- **Budget / Resource Exhaustion:** Always enforce upper limits on `maxTokens`, temperature, and rate limits in `samplingHandler`.
+
+### Roots and workspace boundary exposure
+
+The `roots/list` notification communicates workspace boundaries to servers:
+- Only advertise root directories that the server is legitimately intended to operate within.
+- Never advertise sensitive parent directories (e.g. user home directories or system roots).
+
+### Progress tokens and Denial of Service
+
+Progress notifications (`notifications/progress`) arrive asynchronously:
+- Validate progress token authenticity to prevent spoofing.
+- Debounce high-frequency progress messages if driving UI updates.
+
 ## Known limitations
 
 - **Filesystem sandbox is lexical.** It compares resolved path strings. It does

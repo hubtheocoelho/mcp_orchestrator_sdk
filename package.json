@@ -17,6 +17,8 @@
     "clean": "tsc --build --clean",
     "typecheck": "tsc --build",
     "test": "node --import tsx --test \"packages/**/*.test.ts\"",
+    "api-check": "tsc --noEmit",
+    "ci": "npm run typecheck && npm test && npm run api-check",
     "example": "tsx"
   },
   "devDependencies": {
