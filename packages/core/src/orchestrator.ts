@@ -10,6 +10,7 @@ import {
 } from "./hook-manager.js";
 import { ToolRegistry, type ExecuteOptions, type ToolProvider } from "./tool-registry.js";
 import type { Agent, AgentConfig, JsonObject, Tool, ToolDefinition, ToolResult } from "./types.js";
+import type { OrchestratorEvent } from "./orchestrator-event.js";
 
 /**
  * Minimal structural view of a state backend the orchestrator can delegate to.
@@ -47,6 +48,14 @@ export class ToolNotAllowedError extends Error {
   }
 }
 
+/** Thrown when an operation is aborted via AbortSignal. */
+export class OrchestratorAbortError extends Error {
+  constructor(message = "Operation aborted") {
+    super(message);
+    this.name = "OrchestratorAbortError";
+  }
+}
+
 /**
  * The main orchestration engine. It composes the tool and agent registries with
  * the hook manager and optional state / workflow backends, and provides the
@@ -60,6 +69,7 @@ export class Orchestrator {
 
   private readonly state?: StateAccess;
   private readonly workflows?: WorkflowRunner;
+  private disposed = false;
 
   constructor(options: OrchestratorOptions = {}) {
     this.tools = options.toolRegistry ?? new ToolRegistry({ auditSinks: options.auditSinks });
@@ -132,6 +142,117 @@ export class Orchestrator {
     return result;
   }
 
+  // --- Streaming tool execution -------------------------------------------
+
+  /**
+   * Streaming version of callTool. Emits tool.chunk events for each chunk.
+   * For tools that do not support streaming, a single chunk with the full
+   * result is emitted (degraded but consistent behavior).
+   */
+  async *callToolStream(
+    toolId: string,
+    params: JsonObject,
+    options: ExecuteOptions = {},
+  ): AsyncGenerator<OrchestratorEvent> {
+    const result = await this.callTool(toolId, params, options);
+    if (result.ok) {
+      const output = result.output as any;
+      if (output && typeof output[Symbol.asyncIterator] === "function") {
+        for await (const chunk of output) {
+          yield { type: "tool.chunk", toolName: toolId, chunk };
+        }
+      } else {
+        yield { type: "tool.chunk", toolName: toolId, chunk: output };
+      }
+    } else {
+      yield { type: "tool.chunk", toolName: toolId, chunk: { error: result.error } };
+    }
+  }
+
+  // --- Streaming workflow execution ---------------------------------------
+
+  /**
+   * Streaming version of executeWorkflow. Yields OrchestratorEvent for every
+   * lifecycle transition. The caller can consume these events to drive a UI,
+   * log progress, or pipe them to an SSE endpoint.
+   *
+   * The existing `executeWorkflow` method is left completely intact; this is
+   * a new, additive API that operates on the same WorkflowRunner.
+   *
+   * @param workflowId   Identifier of the workflow (used for events only).
+   * @param steps        Array of step descriptors `{ id, tool, params?, when?, stop_when? }`.
+   * @param input        Workflow-level input data.
+   * @param options      Execution options including optional `signal` for cancellation.
+   */
+  async *executeWorkflowStream(
+    workflowId: string,
+    steps: ReadonlyArray<{
+      id: string;
+      tool: string;
+      params?: JsonObject;
+      when?: string;
+      stop_when?: string;
+    }>,
+    input: JsonObject,
+    options: ExecuteOptions & { signal?: AbortSignal } = {},
+  ): AsyncGenerator<OrchestratorEvent> {
+    const { signal } = options;
+
+    // Helper: check if we've been aborted and emit the right events.
+    const checkAbort = (): OrchestratorEvent | undefined => {
+      if (signal?.aborted) {
+        return {
+          type: "workflow.failed",
+          workflowId,
+          error: new OrchestratorAbortError(),
+        };
+      }
+      return undefined;
+    };
+
+    // Guard: already aborted before we even start
+    const preAbort = checkAbort();
+    if (preAbort) {
+      yield preAbort;
+      return;
+    }
+
+    yield { type: "workflow.started", workflowId, input };
+
+    const scope: Record<string, any> = { input, steps: {} };
+    let lastOutput: unknown = undefined;
+
+    for (const step of steps) {
+      // Check cancellation between steps
+      const abortEvent = checkAbort();
+      if (abortEvent) {
+        yield abortEvent;
+        return;
+      }
+
+      yield { type: "step.started", stepName: step.id, tool: step.tool };
+
+      const toolResult = await this.callTool(
+        step.tool,
+        step.params ?? ({} as JsonObject),
+        { caller: options.caller, callId: options.callId, signal } as ExecuteOptions,
+      );
+
+      if (toolResult.ok) {
+        yield { type: "step.output", stepName: step.id, output: toolResult.output };
+        scope.steps[step.id] = { output: toolResult.output };
+        lastOutput = toolResult.output;
+      } else {
+        const err = new Error(toolResult.error ?? "unknown error");
+        yield { type: "step.failed", stepName: step.id, error: err, willRetry: false };
+        yield { type: "workflow.failed", workflowId, error: err };
+        return; // terminate the stream on error
+      }
+    }
+
+    yield { type: "workflow.finished", workflowId, result: lastOutput };
+  }
+
   // --- Workflows & state (delegated) --------------------------------------
 
   async executeWorkflow(workflowId: string, inputs: JsonObject, context?: unknown): Promise<unknown> {
@@ -147,6 +268,23 @@ export class Orchestrator {
   async updateState(collection: string, id: string, patch: JsonObject): Promise<void> {
     if (!this.state) throw new Error("No state backend configured on this orchestrator");
     await this.state.update(collection, id, patch);
+  }
+
+  // --- Lifecycle ----------------------------------------------------------
+
+  /**
+   * Gracefully shut down the orchestrator, releasing any resources.
+   * Idempotent — calling dispose() twice is safe.
+   */
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    // Future: close transport connections, cancel subscriptions, etc.
+  }
+
+  /** Support `await using orchestrator = new Orchestrator()` (TC39 Explicit Resource Management). */
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.dispose();
   }
 
   // --- Hook sugar ---------------------------------------------------------
