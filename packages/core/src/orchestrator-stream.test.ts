@@ -218,3 +218,87 @@ test("NoopTracer creates spans without errors", async () => {
   // If we got here without throwing, the noop tracer works.
   assert.ok(true);
 });
+
+// ---------------------------------------------------------------------------
+// Tarefa 2 — Progress Mapping (notifications/progress -> step.progress)
+// ---------------------------------------------------------------------------
+
+test("executeWorkflowStream emits step.progress with increasing progress when reported", async () => {
+  const progressTool: ToolDefinition = {
+    id: "progress_task",
+    description: "Emits incremental progress",
+    schema: { type: "object" },
+    safety: "read-only",
+    execute: async (_params, context) => {
+      context.onProgress?.(25, "one quarter");
+      await new Promise((r) => setTimeout(r, 10));
+      context.onProgress?.(75, "three quarters");
+      await new Promise((r) => setTimeout(r, 10));
+      context.onProgress?.(100, "done");
+      return "complete";
+    },
+  };
+
+  const orch = new Orchestrator();
+  orch.registerTool(progressTool);
+
+  const steps = [{ id: "step1", tool: "progress_task" }];
+  const events = await collectStream(orch.executeWorkflowStream("wf-progress", steps, {}));
+
+  const progressEvents = events.filter(
+    (e): e is Extract<OrchestratorEvent, { type: "step.progress" }> => e.type === "step.progress",
+  );
+
+  assert.equal(progressEvents.length, 3);
+  assert.equal(progressEvents[0]?.progress, 25);
+  assert.equal(progressEvents[0]?.message, "one quarter");
+  assert.equal(progressEvents[1]?.progress, 75);
+  assert.equal(progressEvents[2]?.progress, 100);
+});
+
+test("tool without progress does not emit spurious step.progress", async () => {
+  const orch = new Orchestrator();
+  orch.registerTool(echo);
+
+  const steps = [{ id: "step1", tool: "echo", params: { message: "hi" } as JsonObject }];
+  const events = await collectStream(orch.executeWorkflowStream("wf-no-progress", steps, {}));
+
+  const progressEvents = events.filter((e) => e.type === "step.progress");
+  assert.equal(progressEvents.length, 0);
+});
+
+test("progress respects signal — abort halts emission and emits workflow.failed", async () => {
+  const ctrl = new AbortController();
+  const longProgressTool: ToolDefinition = {
+    id: "long_progress",
+    description: "Slow tool reporting progress",
+    schema: { type: "object" },
+    execute: async (_params, context) => {
+      context.onProgress?.(10, "start");
+      await new Promise((r) => setTimeout(r, 60));
+      context.onProgress?.(50, "half");
+      await new Promise((r) => setTimeout(r, 60));
+      context.onProgress?.(90, "almost");
+      return "finished";
+    },
+  };
+
+  const orch = new Orchestrator();
+  orch.registerTool(longProgressTool);
+
+  setTimeout(() => ctrl.abort(), 30);
+
+  const events = await collectStream(
+    orch.executeWorkflowStream("wf-abort-progress", [{ id: "s1", tool: "long_progress" }], {}, { signal: ctrl.signal }),
+  );
+
+  const types = events.map((e) => e.type);
+  assert.ok(types.includes("workflow.started"));
+  assert.ok(types.includes("step.started"));
+  assert.ok(types.includes("workflow.failed"));
+  // Progress after abort shouldn't be 90
+  const progresses = events
+    .filter((e): e is Extract<OrchestratorEvent, { type: "step.progress" }> => e.type === "step.progress")
+    .map((e) => e.progress);
+  assert.ok(!progresses.includes(90), "Should not emit progress after abortion");
+});

@@ -74,13 +74,15 @@ export interface ProgressNotification {
   readonly progressToken: string | number;
   readonly progress: number;
   readonly total?: number;
+  readonly message?: string;
 }
 
 /** Options passed to transport calls. */
 export interface McpCallOptions {
   readonly signal?: AbortSignal;
   readonly requestId?: string;
-  readonly onProgress?: (notification: ProgressNotification) => void;
+  readonly progressToken?: string | number;
+  readonly onProgress?: (token: string, progress: number, message?: string) => void;
 }
 
 /**

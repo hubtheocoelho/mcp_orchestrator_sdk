@@ -225,9 +225,47 @@ export class Orchestrator {
     params: JsonObject,
     options: ExecuteOptions = {},
   ): AsyncGenerator<OrchestratorEvent> {
-    const result = await this.callTool(toolId, params, options);
-    if (result.ok) {
-      const output = result.output as any;
+    const progressQueue: Array<{ progress: number; message?: string }> = [];
+    let notify: (() => void) | undefined;
+
+    const callPromise = this.callTool(toolId, params, {
+      ...options,
+      onProgress: (progress, message) => {
+        progressQueue.push({ progress, message });
+        notify?.();
+      },
+    });
+
+    let done = false;
+    let result: ToolResult | undefined;
+    callPromise.then(
+      (res) => {
+        done = true;
+        result = res;
+        notify?.();
+      },
+      (err) => {
+        done = true;
+        result = { callId: options.callId ?? "", toolId, ok: false, error: err?.message ?? String(err), durationMs: 0 };
+        notify?.();
+      },
+    );
+
+    while (!done || progressQueue.length > 0) {
+      if (options.signal?.aborted) break;
+      if (progressQueue.length > 0) {
+        const p = progressQueue.shift()!;
+        yield { type: "step.progress", stepName: toolId, progress: p.progress, message: p.message };
+      } else if (!done) {
+        await new Promise<void>((resolve) => {
+          notify = resolve;
+        });
+      }
+    }
+
+    const finalResult = result ?? (await callPromise);
+    if (finalResult.ok) {
+      const output = finalResult.output as any;
       if (output && typeof output[Symbol.asyncIterator] === "function") {
         for await (const chunk of output) {
           yield { type: "tool.chunk", toolName: toolId, chunk };
@@ -236,7 +274,7 @@ export class Orchestrator {
         yield { type: "tool.chunk", toolName: toolId, chunk: output };
       }
     } else {
-      yield { type: "tool.chunk", toolName: toolId, chunk: { error: result.error } };
+      yield { type: "tool.chunk", toolName: toolId, chunk: { error: finalResult.error } };
     }
   }
 
@@ -303,18 +341,82 @@ export class Orchestrator {
 
       yield { type: "step.started", stepName: step.id, tool: step.tool };
 
-      const toolResult = await this.callTool(
+      const progressQueue: Array<{ progress: number; message?: string }> = [];
+      let notifyProgress: (() => void) | undefined;
+
+      const callPromise = this.callTool(
         step.tool,
         step.params ?? ({} as JsonObject),
-        { caller: options.caller, callId: options.callId, signal } as ExecuteOptions,
+        {
+          caller: options.caller,
+          callId: options.callId,
+          signal,
+          onProgress: (progress, message) => {
+            progressQueue.push({ progress, message });
+            notifyProgress?.();
+          },
+        } as ExecuteOptions,
       );
 
-      if (toolResult.ok) {
-        yield { type: "step.output", stepName: step.id, output: toolResult.output };
-        scope.steps[step.id] = { output: toolResult.output };
-        lastOutput = toolResult.output;
+      let toolCompleted = false;
+      let toolResult: ToolResult | undefined;
+      callPromise.then(
+        (res) => {
+          toolCompleted = true;
+          toolResult = res;
+          notifyProgress?.();
+        },
+        (err) => {
+          toolCompleted = true;
+          toolResult = {
+            callId: options.callId ?? "",
+            toolId: step.tool,
+            ok: false,
+            error: err?.message ?? String(err),
+            durationMs: 0,
+          };
+          notifyProgress?.();
+        },
+      );
+
+      while (!toolCompleted || progressQueue.length > 0) {
+        if (signal?.aborted) {
+          const abortErr = new OrchestratorAbortError();
+          yield { type: "step.failed", stepName: step.id, error: abortErr, willRetry: false };
+          yield { type: "workflow.failed", workflowId, error: abortErr };
+          return;
+        }
+
+        if (progressQueue.length > 0) {
+          const p = progressQueue.shift()!;
+          yield {
+            type: "step.progress",
+            stepName: step.id,
+            progress: p.progress,
+            message: p.message,
+          };
+        } else if (!toolCompleted) {
+          await new Promise<void>((resolve) => {
+            notifyProgress = resolve;
+          });
+        }
+      }
+
+      const finalResult = toolResult!;
+
+      if (signal?.aborted) {
+        const abortErr = new OrchestratorAbortError();
+        yield { type: "step.failed", stepName: step.id, error: abortErr, willRetry: false };
+        yield { type: "workflow.failed", workflowId, error: abortErr };
+        return;
+      }
+
+      if (finalResult.ok) {
+        yield { type: "step.output", stepName: step.id, output: finalResult.output };
+        scope.steps[step.id] = { output: finalResult.output };
+        lastOutput = finalResult.output;
       } else {
-        const err = new Error(toolResult.error ?? "unknown error");
+        const err = new Error(finalResult.error ?? "unknown error");
         yield { type: "step.failed", stepName: step.id, error: err, willRetry: false };
         yield { type: "workflow.failed", workflowId, error: err };
         return; // terminate the stream on error

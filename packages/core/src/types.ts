@@ -83,6 +83,8 @@ export interface ToolExecutionContext {
   readonly metadata: Readonly<JsonObject>;
   /** AbortSignal, if the caller supports cancellation. */
   readonly signal?: AbortSignal;
+  /** Callback for reporting incremental execution progress. */
+  readonly onProgress?: (progress: number, message?: string) => void;
 }
 
 /** A record of a tool invocation request. */

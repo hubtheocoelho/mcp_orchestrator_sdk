@@ -27,6 +27,8 @@ export interface ExecuteOptions {
   readonly caller?: string;
   readonly metadata?: JsonObject;
   readonly signal?: AbortSignal;
+  /** Callback for reporting incremental execution progress. */
+  readonly onProgress?: (progress: number, message?: string) => void;
   /** Override the generated call id (useful for correlating with a parent op). */
   readonly callId?: string;
 }
@@ -154,6 +156,7 @@ export class ToolRegistry {
         caller,
         metadata: options.metadata ?? {},
         signal: options.signal,
+        onProgress: options.onProgress,
       });
       const result: ToolResult = {
         callId,

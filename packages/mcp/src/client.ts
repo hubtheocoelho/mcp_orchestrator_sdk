@@ -50,6 +50,7 @@ export class McpClient implements ToolProvider {
   private readonly namespace: (clientId: string, toolName: string) => string;
   private readonly _samplingHandler?: (req: SamplingRequest) => Promise<CompletionResult>;
   private readonly _onProgress?: (notification: ProgressNotification) => void;
+  private readonly activeProgressHandlers = new Map<string | number, (token: string, progress: number, message?: string) => void>();
   private connected = false;
   private disposed = false;
 
@@ -88,7 +89,17 @@ export class McpClient implements ToolProvider {
   /** Call a remote tool by its un-namespaced name. */
   async callTool(toolName: string, params: JsonObject, options?: McpCallOptions): Promise<JsonValue> {
     this.assertConnected();
-    return this.transport.callTool(toolName, params, options);
+    const token = options?.progressToken ?? options?.requestId;
+    if (options?.onProgress && token !== undefined) {
+      this.activeProgressHandlers.set(token, options.onProgress);
+    }
+    try {
+      return await this.transport.callTool(toolName, params, options);
+    } finally {
+      if (token !== undefined) {
+        this.activeProgressHandlers.delete(token);
+      }
+    }
   }
 
   // --- Resources ----------------------------------------------------------
@@ -148,8 +159,12 @@ export class McpClient implements ToolProvider {
 
   // --- Progress (Phase 4) -------------------------------------------------
 
-  /** Forward a progress notification to the configured handler. */
+  /** Forward a progress notification to the configured handler and active call listeners. */
   handleProgress(notification: ProgressNotification): void {
+    const handler = this.activeProgressHandlers.get(notification.progressToken);
+    if (handler) {
+      handler(String(notification.progressToken), notification.progress, notification.message);
+    }
     this._onProgress?.(notification);
   }
 
@@ -190,6 +205,10 @@ export class McpClient implements ToolProvider {
         this.callTool(descriptor.name, params, {
           signal: context?.signal,
           requestId: context?.callId,
+          progressToken: context?.callId,
+          onProgress: (_token, progress, message) => {
+            context?.onProgress?.(progress, message);
+          },
         }),
     };
   }
