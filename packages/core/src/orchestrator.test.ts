@@ -134,3 +134,29 @@ test("audit sinks receive orchestrated calls", async () => {
   await orch.callTool("echo", { text: "hi" });
   assert.equal(sink.all().length, 1);
 });
+
+test("registerPromptProvider and getPrompt delegate to provider", async () => {
+  const orch = new Orchestrator();
+  orch.registerPromptProvider({
+    listPrompts: async () => [{ name: "summary" }],
+    getPrompt: async (name, args) => ({ template: `${name}:${args?.topic}` }),
+  });
+
+  const prompts = await orch.listPrompts();
+  assert.equal(prompts.length, 1);
+  const prompt = (await orch.getPrompt("summary", { topic: "AI" })) as { template: string };
+  assert.equal(prompt.template, "summary:AI");
+});
+
+test("registerResourceProvider and readResource delegate to provider", async () => {
+  const orch = new Orchestrator();
+  orch.registerResourceProvider({
+    listResources: async () => [{ uri: "doc://readme" }],
+    readResource: async (uri) => `content of ${uri}`,
+  });
+
+  const resources = await orch.listResources();
+  assert.equal(resources.length, 1);
+  const content = await orch.readResource("doc://readme");
+  assert.equal(content, "content of doc://readme");
+});

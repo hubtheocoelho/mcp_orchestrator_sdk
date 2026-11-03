@@ -11,6 +11,7 @@ import {
 import { ToolRegistry, type ExecuteOptions, type ToolProvider } from "./tool-registry.js";
 import type { Agent, AgentConfig, JsonObject, Tool, ToolDefinition, ToolResult } from "./types.js";
 import type { OrchestratorEvent } from "./orchestrator-event.js";
+import { NoopTracer, type Tracer } from "./tracing.js";
 
 /**
  * Minimal structural view of a state backend the orchestrator can delegate to.
@@ -28,6 +29,18 @@ export interface WorkflowRunner {
   execute(workflowId: string, inputs: JsonObject, context?: unknown): Promise<unknown>;
 }
 
+/** Structural view of a provider offering prompts (e.g. McpClient). */
+export interface PromptProvider {
+  listPrompts?(): Promise<unknown[]>;
+  getPrompt?(name: string, args?: JsonObject): Promise<unknown>;
+}
+
+/** Structural view of a provider offering resources (e.g. McpClient). */
+export interface ResourceProvider {
+  listResources?(): Promise<unknown[]>;
+  readResource?(uri: string): Promise<string>;
+}
+
 export interface OrchestratorOptions {
   toolRegistry?: ToolRegistry;
   agentRegistry?: AgentRegistry;
@@ -35,6 +48,8 @@ export interface OrchestratorOptions {
   auditSinks?: AuditSink[];
   state?: StateAccess;
   workflows?: WorkflowRunner;
+  tracer?: import("./tracing.js").Tracer;
+  samplingHandler?: (req: unknown) => Promise<unknown>;
 }
 
 /** Thrown when an agent attempts to call a tool outside its allowlist. */
@@ -66,9 +81,13 @@ export class Orchestrator {
   readonly tools: ToolRegistry;
   readonly agents: AgentRegistry;
   readonly hooks: HookManager;
+  readonly tracer: import("./tracing.js").Tracer;
+  readonly samplingHandler?: (req: unknown) => Promise<unknown>;
 
   private readonly state?: StateAccess;
   private readonly workflows?: WorkflowRunner;
+  private readonly promptProviders: PromptProvider[] = [];
+  private readonly resourceProviders: ResourceProvider[] = [];
   private disposed = false;
 
   constructor(options: OrchestratorOptions = {}) {
@@ -77,6 +96,8 @@ export class Orchestrator {
     this.hooks = options.hooks ?? new HookManager();
     this.state = options.state;
     this.workflows = options.workflows;
+    this.tracer = options.tracer ?? NoopTracer;
+    this.samplingHandler = options.samplingHandler;
   }
 
   // --- Registration -------------------------------------------------------
@@ -94,6 +115,56 @@ export class Orchestrator {
   /** Discover and register every tool from a provider (e.g. an MCP client). */
   async registerToolProvider(provider: ToolProvider): Promise<Tool[]> {
     return this.tools.discover(provider);
+  }
+
+  registerPromptProvider(provider: PromptProvider): void {
+    this.promptProviders.push(provider);
+  }
+
+  registerResourceProvider(provider: ResourceProvider): void {
+    this.resourceProviders.push(provider);
+  }
+
+  async listPrompts(): Promise<unknown[]> {
+    const all: unknown[] = [];
+    for (const p of this.promptProviders) {
+      if (p.listPrompts) all.push(...(await p.listPrompts()));
+    }
+    return all;
+  }
+
+  async getPrompt(name: string, args?: JsonObject): Promise<unknown> {
+    for (const p of this.promptProviders) {
+      if (p.getPrompt) {
+        try {
+          return await p.getPrompt(name, args);
+        } catch {
+          // continue searching providers
+        }
+      }
+    }
+    throw new Error(`Prompt "${name}" not found in any registered provider`);
+  }
+
+  async listResources(): Promise<unknown[]> {
+    const all: unknown[] = [];
+    for (const r of this.resourceProviders) {
+      if (r.listResources) all.push(...(await r.listResources()));
+    }
+    return all;
+  }
+
+  async readResource(uri: string): Promise<string> {
+    for (const r of this.resourceProviders) {
+      if (r.readResource) {
+        try {
+          return await r.readResource(uri);
+        } catch {
+          // continue searching providers
+        }
+      }
+    }
+    throw new Error(`Resource "${uri}" not found in any registered provider`);
   }
 
   // --- Tool execution -----------------------------------------------------
