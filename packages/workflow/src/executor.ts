@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { NoopTracer, type JsonObject, type Tracer } from "@mcp-orchestrator/core";
+import { NoopTracer, OrchestratorAbortError, type JsonObject, type Tracer } from "@mcp-orchestrator/core";
 import type { WorkflowAuditSink } from "./audit.js";
 import type { CheckpointStore, WorkflowCheckpoint } from "./checkpoint.js";
 import {
@@ -129,6 +129,7 @@ export class WorkflowExecutor {
       } else if (policy === "continue") {
         // "continue" continues past a failed step, but reports failure at the end
         failure = failure ?? `Step "${step.id}" failed: ${result.error}`;
+        scope.steps[step.id] = { output: result.output };
       } else {
         // "fail", and "retry" once exhausted, abort the run.
         failure = `Step "${step.id}" failed: ${result.error}`;
@@ -202,23 +203,83 @@ export class WorkflowExecutor {
 
     // Support parallel step execution if step.parallel is defined
     if (step.parallel && step.parallel.length > 0) {
-      const outcomes = await Promise.all(
-        step.parallel.map((toolName, idx) =>
-          this.tools.callTool(toolName, params, {
-            caller: context.caller,
-            callId: `${runId}:${step.id}:${toolName}:${idx}`,
-            signal: context.signal,
-          }),
-        ),
-      );
+      if (context.signal?.aborted) {
+        throw new OrchestratorAbortError();
+      }
 
-      const failedOutcome = outcomes.find((o) => !o.ok);
-      if (failedOutcome) {
+      for (const toolName of step.parallel) {
+        await this.emit({
+          type: "step-start",
+          runId,
+          stepId: `${step.id}.${toolName}`,
+          toolId: toolName,
+          at: Date.now(),
+        });
+      }
+
+      const tasks = step.parallel.map(async (toolName, idx) => {
+        if (context.signal?.aborted) {
+          throw new OrchestratorAbortError();
+        }
+        const outcome = await this.tools.callTool(toolName, params, {
+          caller: context.caller,
+          callId: `${runId}:${step.id}:${toolName}:${idx}`,
+          signal: context.signal,
+        });
+
+        await this.emit({
+          type: "step-complete",
+          runId,
+          step: {
+            id: `${step.id}.${toolName}`,
+            toolId: toolName,
+            status: outcome.ok ? "success" : "failed",
+            output: outcome.output,
+            error: outcome.error,
+            attempts: 1,
+            durationMs: 0,
+          },
+          at: Date.now(),
+        });
+
+        if (context.signal?.aborted) {
+          throw new OrchestratorAbortError();
+        }
+
+        return { toolName, outcome };
+      });
+
+      let results: Array<{ toolName: string; outcome: { ok: boolean; output?: unknown; error?: string } }>;
+
+      if (policy === "continue") {
+        const settled = await Promise.allSettled(tasks);
+        results = settled.map((s, idx) => {
+          if (s.status === "fulfilled") {
+            return s.value;
+          }
+          const err = s.reason;
+          if (err instanceof OrchestratorAbortError || err?.name === "AbortError") {
+            throw err;
+          }
+          return {
+            toolName: step.parallel![idx]!,
+            outcome: { ok: false, error: err?.message ?? String(err) },
+          };
+        });
+      } else {
+        results = await Promise.all(tasks);
+      }
+
+      const anyFailed = results.find((r) => !r.outcome.ok);
+      const aggregatedOutputs = results.map((r) => r.outcome.output);
+
+      if (anyFailed && policy !== "continue") {
         return {
           id: step.id,
           toolId: step.tool,
           status: "failed",
-          error: failedOutcome.error ?? "Parallel execution failed",
+          error: anyFailed.outcome.error ?? "Parallel execution failed",
+          output: aggregatedOutputs,
           attempts: 1,
           durationMs: Date.now() - startedAt,
         };
@@ -227,8 +288,9 @@ export class WorkflowExecutor {
       return {
         id: step.id,
         toolId: step.tool,
-        status: "success",
-        output: outcomes.map((o) => o.output),
+        status: anyFailed ? "failed" : "success",
+        error: anyFailed ? anyFailed.outcome.error : undefined,
+        output: aggregatedOutputs,
         attempts: 1,
         durationMs: Date.now() - startedAt,
       };

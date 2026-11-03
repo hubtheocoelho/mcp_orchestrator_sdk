@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Orchestrator, type ToolDefinition } from "@mcp-orchestrator/core";
+import { Orchestrator, OrchestratorAbortError, type ToolDefinition } from "@mcp-orchestrator/core";
 import { InMemoryWorkflowAuditSink } from "./audit.js";
 import { WorkflowEngine, WorkflowNotFoundError } from "./engine.js";
 import { WorkflowExecutor, WorkflowInputError } from "./executor.js";
@@ -314,6 +314,114 @@ test("workflow with 2 parallel steps executes in approx max(t1, t2), not sum", a
   assert.deepEqual(result.steps[0]?.output, ["slow1", "slow2"]);
   // If run in series it would take >= 130ms. In parallel it should take < 115ms.
   assert.ok(elapsed < 120, `Expected parallel execution under 120ms, took ${elapsed}ms`);
+});
+
+test("parallel steps with sleep(100ms) executes in ~100ms, not 200ms", async () => {
+  const executor = new WorkflowExecutor({
+    tools: {
+      callTool: async (id) => {
+        await new Promise((r) => setTimeout(r, 100));
+        return { ok: true, output: `${id}_done` };
+      },
+    },
+  });
+
+  const start = Date.now();
+  const result = await executor.execute({
+    id: "parallel-100",
+    inputs: {},
+    steps: [
+      {
+        id: "both",
+        tool: "t1",
+        parallel: ["t1", "t2"],
+        params: {},
+        on_failure: "fail",
+      },
+    ],
+    outputs: {},
+  });
+
+  const elapsed = Date.now() - start;
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.steps[0]?.output, ["t1_done", "t2_done"]);
+  assert.ok(elapsed < 170, `Expected ~100ms, took ${elapsed}ms`);
+});
+
+test("parallel steps with onError: continue delivers final result with failure reported and remaining completed", async () => {
+  const executor = new WorkflowExecutor({
+    tools: {
+      callTool: async (id) => {
+        if (id === "fail_tool") return { ok: false, error: "Tool failed" };
+        return { ok: true, output: `${id}_success` };
+      },
+    },
+  });
+
+  const result = await executor.execute({
+    id: "parallel-continue",
+    inputs: {},
+    steps: [
+      {
+        id: "parallel_step",
+        tool: "parent",
+        parallel: ["good_tool", "fail_tool"],
+        params: {},
+        onError: "continue",
+        on_failure: "fail",
+      },
+    ],
+    outputs: {
+      res: "${steps.parallel_step.output}",
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /failed/);
+  assert.deepEqual(result.steps[0]?.output, ["good_tool_success", undefined]);
+  assert.deepEqual(result.outputs.res, ["good_tool_success", undefined]);
+});
+
+test("signal aborts parallel steps and rejects with OrchestratorAbortError", async () => {
+  const ctrl = new AbortController();
+  const executor = new WorkflowExecutor({
+    tools: {
+      callTool: async (_id, _params, options) => {
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => resolve({ ok: true, output: "done" }), 200);
+          options?.signal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            reject(new OrchestratorAbortError());
+          });
+        });
+      },
+    },
+  });
+
+  setTimeout(() => ctrl.abort(), 20);
+
+  await assert.rejects(
+    () =>
+      executor.execute(
+        {
+          id: "parallel-abort",
+          inputs: {},
+          steps: [
+            {
+              id: "p_abort",
+              tool: "t1",
+              parallel: ["t1", "t2"],
+              params: {},
+              on_failure: "fail",
+            },
+          ],
+          outputs: {},
+        },
+        {},
+        { signal: ctrl.signal },
+      ),
+    (err: any) => err.name === "OrchestratorAbortError",
+  );
 });
 
 test("workflow that fails on step 3 can be resumed from step 3 with checkpoint", async () => {
