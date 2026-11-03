@@ -1,14 +1,23 @@
 import type { JsonObject, JsonValue } from "@mcp-orchestrator/core";
-import type { McpTransport, RemoteToolDescriptor, Resource } from "./types.js";
+import type { McpTransport, PromptDescriptor, PromptResult, RemoteToolDescriptor, Resource } from "./types.js";
 
 /** A single tool served by an {@link InMemoryTransport}. */
 export interface InMemoryTool extends RemoteToolDescriptor {
   handler(args: JsonObject): Promise<JsonValue> | JsonValue;
 }
 
+/** A prompt template served by an {@link InMemoryTransport}. */
+export interface InMemoryPrompt {
+  name: string;
+  description?: string;
+  arguments?: PromptDescriptor["arguments"];
+  handler(args?: JsonObject): Promise<PromptResult> | PromptResult;
+}
+
 export interface InMemoryTransportOptions {
   tools?: InMemoryTool[];
   resources?: Array<Resource & { read(): Promise<string> | string }>;
+  prompts?: InMemoryPrompt[];
 }
 
 /**
@@ -20,11 +29,13 @@ export interface InMemoryTransportOptions {
 export class InMemoryTransport implements McpTransport {
   private readonly tools = new Map<string, InMemoryTool>();
   private readonly resources = new Map<string, Resource & { read(): Promise<string> | string }>();
+  private readonly prompts = new Map<string, InMemoryPrompt>();
   private started = false;
 
   constructor(options: InMemoryTransportOptions = {}) {
     for (const tool of options.tools ?? []) this.tools.set(tool.name, tool);
     for (const resource of options.resources ?? []) this.resources.set(resource.uri, resource);
+    for (const prompt of options.prompts ?? []) this.prompts.set(prompt.name, prompt);
   }
 
   async start(): Promise<void> {
@@ -61,6 +72,22 @@ export class InMemoryTransport implements McpTransport {
     const resource = this.resources.get(uri);
     if (!resource) throw new Error(`Unknown MCP resource: ${uri}`);
     return resource.read();
+  }
+
+  async listPrompts(): Promise<PromptDescriptor[]> {
+    this.assertStarted();
+    return [...this.prompts.values()].map(({ name, description, arguments: args }) => ({
+      name,
+      description,
+      arguments: args,
+    }));
+  }
+
+  async getPrompt(name: string, args?: JsonObject): Promise<PromptResult> {
+    this.assertStarted();
+    const prompt = this.prompts.get(name);
+    if (!prompt) throw new Error(`Unknown MCP prompt: ${name}`);
+    return prompt.handler(args);
   }
 
   private assertStarted(): void {

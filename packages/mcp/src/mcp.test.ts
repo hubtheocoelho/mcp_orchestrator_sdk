@@ -16,6 +16,21 @@ function makeClient(id: string, toolName: string) {
       },
     ],
     resources: [{ uri: "mem://greeting", name: "greeting", read: () => "hello" }],
+    prompts: [
+      {
+        name: "summarize",
+        description: "Summarizes text",
+        arguments: [{ name: "text", required: true }],
+        handler: (args) => ({
+          messages: [
+            {
+              role: "user" as const,
+              content: { type: "text", text: `Summarize: ${(args as any)?.text ?? ""}` },
+            },
+          ],
+        }),
+      },
+    ],
   });
   return new McpClient({ id, transport });
 }
@@ -71,4 +86,93 @@ test("orchestrator discovers MCP tools via the client as a ToolProvider", async 
   const result = await orch.callTool("calc.add", { x: 7 });
   assert.equal(result.ok, true);
   assert.deepEqual(result.output, { echoed: 7 });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4 — Prompts
+// ---------------------------------------------------------------------------
+
+test("client lists prompts from transport", async () => {
+  const client = makeClient("ai", "gen");
+  await client.connect();
+  const prompts = await client.listPrompts();
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0]!.name, "summarize");
+});
+
+test("client gets a prompt with arguments", async () => {
+  const client = makeClient("ai", "gen");
+  await client.connect();
+  const result = await client.getPrompt("summarize", { text: "hello world" } as any);
+  assert.equal(result.messages[0]!.content.text, "Summarize: hello world");
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4 — Sampling
+// ---------------------------------------------------------------------------
+
+test("sampling handler is invoked for sampling requests", async () => {
+  const transport = new InMemoryTransport({ tools: [] });
+  const client = new McpClient({
+    id: "test",
+    transport,
+    samplingHandler: async (req) => ({
+      role: "assistant",
+      content: { type: "text", text: `Answered: ${req.messages[0]?.content.text ?? ""}` },
+      model: "test-model",
+      stopReason: "endTurn",
+    }),
+  });
+  await client.connect();
+
+  const result = await client.handleSamplingRequest({
+    messages: [{ role: "user", content: { type: "text", text: "What is 2+2?" } }],
+    maxTokens: 100,
+  });
+  assert.equal(result.content.text, "Answered: What is 2+2?");
+  assert.equal(result.model, "test-model");
+});
+
+test("sampling request without handler throws", async () => {
+  const transport = new InMemoryTransport({ tools: [] });
+  const client = new McpClient({ id: "test", transport });
+  await client.connect();
+  await assert.rejects(
+    () => client.handleSamplingRequest({ messages: [], maxTokens: 100 }),
+    /no samplingHandler/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4 — Progress
+// ---------------------------------------------------------------------------
+
+test("progress notifications are forwarded to handler", async () => {
+  const notifications: any[] = [];
+  const transport = new InMemoryTransport({ tools: [] });
+  const client = new McpClient({
+    id: "test",
+    transport,
+    onProgress: (n) => notifications.push(n),
+  });
+  await client.connect();
+
+  client.handleProgress({ progressToken: "tok1", progress: 50, total: 100 });
+  client.handleProgress({ progressToken: "tok1", progress: 100, total: 100 });
+
+  assert.equal(notifications.length, 2);
+  assert.equal(notifications[0]!.progress, 50);
+  assert.equal(notifications[1]!.progress, 100);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 5 — Lifecycle
+// ---------------------------------------------------------------------------
+
+test("McpClient dispose is idempotent", async () => {
+  const client = makeClient("d", "tool");
+  await client.connect();
+  await client.dispose();
+  await client.dispose(); // second call should not throw
+  assert.equal(client.isConnected(), false);
 });

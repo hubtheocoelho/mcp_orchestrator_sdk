@@ -136,4 +136,19 @@ export class HttpTransport implements McpTransport {
     // Resources are returned as plain text (binary can be base64‑encoded if needed).
     return await resp.text();
   }
+
+  // -------------------------------------------------------------------
+  // Lifecycle
+  // -------------------------------------------------------------------
+
+  /**
+   * Gracefully shut down the transport. Idempotent — calling dispose() twice is safe.
+   */
+  async dispose(): Promise<void> {
+    await this.close();
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.dispose();
+  }
 }
