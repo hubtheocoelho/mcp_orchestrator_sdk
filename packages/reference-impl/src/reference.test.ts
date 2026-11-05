@@ -72,3 +72,44 @@ test("runHarness executes successfully with streaming and dispose", async () => 
   const { runHarness } = await import("./harness.js");
   await assert.doesNotReject(() => runHarness({ filesystemRoot: root }));
 });
+
+test("executeWorkflowStream runs inline steps with full workflow semantics via the engine", async () => {
+  const { orchestrator } = createReferenceOrchestrator({ filesystemRoot: root });
+  const events = [];
+  for await (const event of orchestrator.executeWorkflowStream(
+    "stream-semantics",
+    [
+      { id: "write", tool: "filesystem.write_file", params: { path: "s.txt", content: "${input.text}" } },
+      { id: "skipped", tool: "filesystem.read_file", params: { path: "missing.txt" }, when: "${input.never}" },
+      { id: "read", tool: "filesystem.read_file", params: { path: "s.txt" } },
+    ],
+    { text: "interpolated", never: false },
+  )) {
+    events.push(event);
+  }
+
+  const started = events.filter((e) => e.type === "step.started").map((e) => (e as { stepName: string }).stepName);
+  assert.deepEqual(started, ["write", "read"], "`when` gate is honored");
+  const last = events.at(-1);
+  assert.equal(last?.type, "workflow.finished");
+  assert.match(JSON.stringify((last as { result: unknown }).result), /interpolated/);
+});
+
+test("streamWorkflow streams a registered workflow", async () => {
+  const { orchestrator, workflows } = createReferenceOrchestrator({ filesystemRoot: root });
+  workflows.define({
+    id: "registered-stream",
+    inputs: { text: { type: "string", required: true } },
+    steps: [{ id: "w", tool: "filesystem.write_file", params: { path: "r.txt", content: "${input.text}" } }],
+    outputs: { done: "yes" },
+  });
+
+  const types = [];
+  let finished: unknown;
+  for await (const event of orchestrator.streamWorkflow("registered-stream", { text: "x" })) {
+    types.push(event.type);
+    if (event.type === "workflow.finished") finished = event.result;
+  }
+  assert.deepEqual(types, ["workflow.started", "step.started", "step.output", "workflow.finished"]);
+  assert.deepEqual(finished, { done: "yes" });
+});

@@ -45,6 +45,12 @@ export function createReferenceOrchestrator(
     auditSinks: [toolAudit],
     workflows: {
       execute: (id, inputs, context) => engine.execute(id, inputs, context as ExecutionContext),
+      executeDefinition: (definition, inputs, context) =>
+        engine.executeDefinition(
+          definition as Parameters<WorkflowEngine["executeDefinition"]>[0],
+          inputs,
+          context as ExecutionContext,
+        ),
     },
   });
   engine = new WorkflowEngine({ tools: orchestrator, auditSinks: [workflowAudit] });
