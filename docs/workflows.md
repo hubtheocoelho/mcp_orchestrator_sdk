@@ -97,7 +97,13 @@ Steps run sequentially in declaration order.
 | Step fails, `on_failure: "fail"` | Run stops with `ok: false` and `error: 'Step "<id>" failed: …'`. |
 | Step fails, `on_failure: "retry"` | Re-run up to `retry.max` **total attempts** (default 1), waiting `retry.delayMs` between them; if all fail, behaves like `fail`. |
 | Step fails, `on_failure: "skip"` | Step recorded as `failed`, run continues; its output is not stored. |
+| Step fails, `on_failure: "continue"` | Run continues and ends with `ok: false`; `steps.<id>.error` holds the error (and `steps.<id>.output` any partial output) for later steps. |
 | Unknown tool id | The step fails like any other failure (it does not throw). |
+
+With a `checkpointStore` in the execution context, checkpoints are saved per
+run (`workflowId` + `runId`) and removed when the run completes.
+`executor.resume(definition, store, { runId })` resumes a specific run; without
+`runId` it resumes the most recently checkpointed run of that workflow.
 
 On success, `outputs` are interpolated against the final scope. When the run
 fails, `outputs` is `{}`. `execute()` only rejects for an unknown workflow id
@@ -114,5 +120,5 @@ Pass `auditSinks` to the engine to receive `run-start`, `step-start`,
 `step-complete` (including skipped steps) and `run-complete` events.
 `JsonlWorkflowAuditSink` writes one JSON object per line.
 
-> **Known limitation:** unlike tool audit sinks, workflow audit sinks are not yet
-> isolated. A sink that throws makes `execute()` reject.
+Auditing is best-effort, as with tool audit sinks: a sink that throws or
+rejects is ignored and never changes the run's outcome.

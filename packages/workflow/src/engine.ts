@@ -1,4 +1,4 @@
-import { err, ok, type JsonObject, type Result, type ValidationError } from "@mcp-orchestrator/core";
+import { err, ok, type JsonObject, type Result, type Tracer, type ValidationError } from "@mcp-orchestrator/core";
 import type { WorkflowAuditSink } from "./audit.js";
 import { WorkflowExecutor } from "./executor.js";
 import {
@@ -19,6 +19,8 @@ export class WorkflowNotFoundError extends Error {
 export interface WorkflowEngineOptions {
   tools: ToolCaller;
   auditSinks?: WorkflowAuditSink[];
+  /** Tracer for workflow and step spans (a per-run `context.tracer` takes precedence). */
+  tracer?: Tracer;
 }
 
 /**
@@ -31,7 +33,11 @@ export class WorkflowEngine {
   private readonly executor: WorkflowExecutor;
 
   constructor(options: WorkflowEngineOptions) {
-    this.executor = new WorkflowExecutor({ tools: options.tools, auditSinks: options.auditSinks });
+    this.executor = new WorkflowExecutor({
+      tools: options.tools,
+      auditSinks: options.auditSinks,
+      tracer: options.tracer,
+    });
   }
 
   /** Validate, then register (or replace) a workflow definition. */

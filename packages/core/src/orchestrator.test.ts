@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { InMemoryAuditSink } from "./audit.js";
-import { Orchestrator, ToolNotAllowedError } from "./orchestrator.js";
+import { Orchestrator, ToolNotAllowedError, UnknownCallerError } from "./orchestrator.js";
 import type { ToolDefinition } from "./types.js";
 
 const echo: ToolDefinition<{ text: string }, string> = {
@@ -58,6 +58,21 @@ test("agent allowlist blocks disallowed tools", async () => {
   const result = await orch.callTool("echo", { text: "hi" }, { caller: "reader" });
   assert.equal(result.ok, false);
   assert.equal(errors[0] instanceof ToolNotAllowedError, true);
+});
+
+test("unregistered callers are rejected unless explicitly allowed", async () => {
+  const strict = new Orchestrator();
+  strict.registerTool(echo);
+  const errors: Error[] = [];
+  strict.hooks.on("error", (p) => errors.push(p.error));
+  const denied = await strict.callTool("echo", { text: "hi" }, { caller: "typo-agent" });
+  assert.equal(denied.ok, false);
+  assert.equal(errors[0] instanceof UnknownCallerError, true);
+
+  const lenient = new Orchestrator({ allowUnregisteredCallers: true });
+  lenient.registerTool(echo);
+  const allowed = await lenient.callTool("echo", { text: "hi" }, { caller: "typo-agent" });
+  assert.equal(allowed.ok, true);
 });
 
 test("vetoed and disallowed calls still carry a non-empty callId", async () => {

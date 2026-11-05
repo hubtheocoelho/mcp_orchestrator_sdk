@@ -1,5 +1,5 @@
-import { readdir, readFile, writeFile } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { readdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ToolDefinition } from "@mcp-orchestrator/core";
 
 /**
@@ -11,13 +11,31 @@ import type { ToolDefinition } from "@mcp-orchestrator/core";
 export function filesystemDomain(baseDir: string): ToolDefinition[] {
   const root = resolve(baseDir);
 
-  const safePath = (path: string): string => {
-    const target = isAbsolute(path) ? resolve(path) : resolve(root, path);
-    const rel = relative(root, target);
-    if (rel.startsWith("..") || isAbsolute(rel)) {
+  const assertInside = (base: string, target: string, path: string): void => {
+    const rel = relative(base, target);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
       throw new Error(`Path escapes sandbox: ${path}`);
     }
-    return target;
+  };
+
+  /**
+   * Resolve `path` inside the sandbox, following symlinks: both the lexical
+   * path and its real (symlink-resolved) location must stay under the root.
+   * For a file that does not exist yet, its parent directory is resolved.
+   */
+  const safePath = async (path: string): Promise<string> => {
+    const target = isAbsolute(path) ? resolve(path) : resolve(root, path);
+    assertInside(root, target, path);
+    const realRoot = await realpath(root);
+    let real: string;
+    try {
+      real = await realpath(target);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+      real = join(await realpath(dirname(target)), basename(target));
+    }
+    assertInside(realRoot, real, path);
+    return real;
   };
 
   const readFileTool: ToolDefinition<{ path: string }, string> = {
@@ -29,7 +47,7 @@ export function filesystemDomain(baseDir: string): ToolDefinition[] {
       properties: { path: { type: "string", description: "Path relative to the sandbox root" } },
       required: ["path"],
     },
-    execute: async ({ path }) => readFile(safePath(path), "utf8"),
+    execute: async ({ path }) => readFile(await safePath(path), "utf8"),
   };
 
   const writeFileTool: ToolDefinition<{ path: string; content: string }, { bytes: number }> = {
@@ -45,7 +63,7 @@ export function filesystemDomain(baseDir: string): ToolDefinition[] {
       required: ["path", "content"],
     },
     execute: async ({ path, content }) => {
-      await writeFile(safePath(path), content, "utf8");
+      await writeFile(await safePath(path), content, "utf8");
       return { bytes: Buffer.byteLength(content, "utf8") };
     },
   };
@@ -58,7 +76,7 @@ export function filesystemDomain(baseDir: string): ToolDefinition[] {
       type: "object",
       properties: { dir: { type: "string", description: "Directory relative to the sandbox root" } },
     },
-    execute: async ({ dir }) => readdir(safePath(dir ?? ".")),
+    execute: async ({ dir }) => readdir(await safePath(dir ?? ".")),
   };
 
   return [readFileTool, writeFileTool, listFilesTool];
