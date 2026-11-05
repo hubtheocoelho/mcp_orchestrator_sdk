@@ -8,7 +8,7 @@ autonomous agent.
 
 | Control | Where | Guarantee |
 |---------|-------|-----------|
-| Agent tool allowlist | `Orchestrator.callTool` | A call whose `caller` is a **registered** agent can only reach tools in that agent's `tools` list. |
+| Agent tool allowlist | `Orchestrator.callTool` | A call whose `caller` is a registered agent can only reach tools in that agent's `tools` list; any other non-`system` caller is rejected. |
 | Hooks and vetoes | `Orchestrator.callTool` | Every `beforeToolCall` handler runs before execution. If one throws, the tool is not executed. |
 | Param validation | `ToolRegistry.execute` | Params are validated before `execute` runs. |
 | Audit | `ToolRegistry.execute` | Every call that reaches the registry is recorded, including calls that fail validation or reference an unknown tool. Calls blocked by the allowlist or vetoed by a hook stop earlier: they are **not** audited and are reported only through the `error` hook. |
@@ -23,25 +23,17 @@ autonomous agent.
 `destructive` tool by default. Enforce a policy with a hook; see the guardrail
 example in [extending.md](extending.md#hooks-guardrails-and-enrichment).
 
-### The allowlist applies only to registered agents
+### Unknown callers are rejected
 
-`callTool` checks the allowlist only when `caller` is the id of a registered
-agent. The following callers are **unrestricted**:
+`callTool` checks the allowlist when `caller` is the id of a registered agent.
+`"system"` (the default when `caller` is omitted) is unrestricted. Any other
+string that is not a registered agent id, including a typo, is rejected with
+`UnknownCallerError` (reported through the `error` hook, like allowlist
+denials).
 
-- `"system"` (the default when `caller` is omitted);
-- **any string that is not a registered agent id, including a typo.**
-
-This is fail-open. Until it changes, don't let untrusted input choose the
-`caller` value, and register every agent before routing calls for it. You can
-add a fail-closed guard yourself:
-
-```ts
-orchestrator.onBeforeToolCall(({ caller }) => {
-  if (caller !== "system" && !orchestrator.agents.has(caller)) {
-    throw new Error(`Unknown caller: ${caller}`);
-  }
-});
-```
+To restore the old fail-open behavior, construct the orchestrator with
+`allowUnregisteredCallers: true`. Don't combine that with letting untrusted
+input choose the `caller` value.
 
 ### Only `callTool` is guarded
 

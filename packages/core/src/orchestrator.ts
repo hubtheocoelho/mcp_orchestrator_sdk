@@ -80,6 +80,12 @@ export interface OrchestratorOptions {
   workflows?: WorkflowRunner;
   tracer?: Tracer;
   samplingHandler?: (req: unknown) => Promise<unknown>;
+  /**
+   * When `false` (default), a `caller` that is neither `"system"` nor a
+   * registered agent is rejected. Set to `true` to restore the legacy
+   * fail-open behavior where unknown callers may call any tool.
+   */
+  allowUnregisteredCallers?: boolean;
 }
 
 /** Thrown when an agent attempts to call a tool outside its allowlist. */
@@ -90,6 +96,17 @@ export class ToolNotAllowedError extends Error {
   ) {
     super(`Agent "${agentId}" is not allowed to call tool "${toolId}"`);
     this.name = "ToolNotAllowedError";
+  }
+}
+
+/** Thrown when a caller that is not a registered agent attempts a tool call. */
+export class UnknownCallerError extends Error {
+  constructor(
+    readonly caller: string,
+    readonly toolId: string,
+  ) {
+    super(`Caller "${caller}" is not a registered agent and cannot call tool "${toolId}"`);
+    this.name = "UnknownCallerError";
   }
 }
 
@@ -110,6 +127,7 @@ export class Orchestrator {
   private readonly workflows?: WorkflowRunner;
   private readonly promptProviders: PromptProvider[] = [];
   private readonly resourceProviders: ResourceProvider[] = [];
+  private readonly allowUnregisteredCallers: boolean;
   private disposed = false;
 
   constructor(options: OrchestratorOptions = {}) {
@@ -120,6 +138,7 @@ export class Orchestrator {
     this.workflows = options.workflows;
     this.tracer = options.tracer ?? NoopTracer;
     this.samplingHandler = options.samplingHandler;
+    this.allowUnregisteredCallers = options.allowUnregisteredCallers ?? false;
   }
 
   // --- Registration -------------------------------------------------------
@@ -206,10 +225,13 @@ export class Orchestrator {
     const callId = options.callId ?? randomUUID();
     const startedAt = Date.now();
 
-    if (caller !== "system" && this.agents.has(caller)) {
-      const allowed = this.agents.require(caller).allowedTools(this.tools.ids());
-      if (!allowed.includes(toolId)) {
-        const error = new ToolNotAllowedError(caller, toolId);
+    if (caller !== "system") {
+      const agent = this.agents.get(caller);
+      const allowed = agent
+        ? agent.allowedTools(this.tools.ids()).includes(toolId)
+        : this.allowUnregisteredCallers;
+      if (!allowed) {
+        const error = agent ? new ToolNotAllowedError(caller, toolId) : new UnknownCallerError(caller, toolId);
         await this.emitError("callTool", error);
         return { callId, toolId, ok: false, error: error.message, durationMs: 0 };
       }
