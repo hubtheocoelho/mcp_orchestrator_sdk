@@ -1,5 +1,6 @@
 import type { JsonObject, JsonValue, ToolDefinition } from "@mcp-orchestrator/core";
 import { McpClient } from "./client.js";
+import type { McpCallOptions } from "./types.js";
 
 /** Thrown when referencing an MCP id that is not in the pool. */
 export class McpNotFoundError extends Error {
@@ -67,7 +68,12 @@ export class McpPool {
   }
 
   /** Call a specific MCP's tool directly, bypassing the registry. */
-  async callTool(mcpId: string, toolName: string, params: JsonObject): Promise<JsonValue> {
-    return this.require(mcpId).callTool(toolName, params);
+  async callTool(
+    mcpId: string,
+    toolName: string,
+    params: JsonObject,
+    options?: McpCallOptions,
+  ): Promise<JsonValue> {
+    return this.require(mcpId).callTool(toolName, params, options);
   }
 }

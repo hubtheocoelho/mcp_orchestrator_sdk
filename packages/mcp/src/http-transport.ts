@@ -28,7 +28,7 @@
 //   import { HttpTransport } from "@mcp-orchestrator/mcp";
 //   const transport = new HttpTransport({ baseUrl: "http://localhost:8080" });
 //   await transport.start();
-//   const client = new McpClient({ transport, clientId: "my-harness" });
+//   const client = new McpClient({ id: "my-harness", transport });
 //   // register the client in an Orchestrator, then call tools or resources.
 //
 // ---------------------------------------------------------------

@@ -277,3 +277,18 @@ test("orchestrator.callTool with signal propagates abort down to fetch", async (
   assert.ok(signalReceived, "fetch received signal");
   assert.equal(signalReceived, controller.signal);
 });
+
+test("HttpTransport is exported from the package entry point", async () => {
+  const entry = await import("./index.js");
+  assert.equal(typeof entry.HttpTransport, "function");
+});
+
+test("McpPool.callTool forwards call options to the client", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const pool = new McpPool().add(
+    new McpClient({ id: "m", transport: new InMemoryTransport({ tools: [{ name: "t", handler: () => "ran" }] }) }),
+  );
+  await pool.connectAll();
+  await assert.rejects(() => pool.callTool("m", "t", {}, { signal: controller.signal }));
+});
