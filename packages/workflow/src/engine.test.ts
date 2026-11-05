@@ -654,3 +654,45 @@ test("a successful run clears its checkpoint", async () => {
   assert.equal(await store.load("clean", "r"), null);
 });
 
+test("a step failed under 'continue' exposes its error to later steps", async () => {
+  const seen: unknown[] = [];
+  const executor = new WorkflowExecutor({
+    tools: {
+      callTool: async (id, params) => {
+        if (id === "fail") return { ok: false, error: "nope" };
+        seen.push(params.err);
+        return { ok: true, output: "ok" };
+      },
+    },
+  });
+  await executor.execute({
+    id: "continue-error",
+    inputs: {},
+    steps: [
+      { id: "a", tool: "fail", params: {}, on_failure: "continue" },
+      { id: "b", tool: "ok", params: { err: "${steps.a.error}" }, on_failure: "fail" },
+    ],
+    outputs: {},
+  });
+  assert.deepEqual(seen, ["nope"]);
+});
+
+test("a failing workflow audit sink does not break the run", async () => {
+  const executor = new WorkflowExecutor({
+    tools: { callTool: async () => ({ ok: true, output: 1 }) },
+    auditSinks: [
+      {
+        record: () => {
+          throw new Error("sink down");
+        },
+      },
+    ],
+  });
+  const result = await executor.execute({
+    id: "sink",
+    inputs: {},
+    steps: [{ id: "a", tool: "t", params: {}, on_failure: "fail" }],
+    outputs: {},
+  });
+  assert.equal(result.ok, true);
+});

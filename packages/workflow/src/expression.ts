@@ -4,8 +4,12 @@ import type { JsonObject } from "@mcp-orchestrator/core";
 export interface ExpressionScope {
   /** Workflow inputs, referenced as `${input.x}`. */
   readonly input: JsonObject;
-  /** Completed step outputs, referenced as `${steps.id.output}` (or `.output.field`). */
-  readonly steps: Record<string, { output: unknown }>;
+  /**
+   * Completed step outputs, referenced as `${steps.id.output}` (or `.output.field`).
+   * Steps that failed under the `continue` policy also carry `error` (and any partial
+   * output, e.g. from parallel tools).
+   */
+  readonly steps: Record<string, { output: unknown; error?: string }>;
 }
 
 const FULL_REF = /^\$\{([^}]+)\}$/;

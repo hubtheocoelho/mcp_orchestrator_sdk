@@ -172,7 +172,7 @@ export class WorkflowExecutor {
       } else if (policy === "continue") {
         // "continue" continues past a failed step, but reports failure at the end
         failure = failure ?? `Step "${step.id}" failed: ${result.error}`;
-        scope.steps[step.id] = { output: result.output };
+        scope.steps[step.id] = { output: result.output, error: result.error ?? "unknown error" };
       } else {
         // "fail", and "retry" once exhausted, abort the run.
         failure = `Step "${step.id}" failed: ${result.error}`;
@@ -412,7 +412,8 @@ export class WorkflowExecutor {
   }
 
   private async emit(event: Parameters<WorkflowAuditSink["record"]>[0]): Promise<void> {
-    await Promise.all(this.sinks.map((sink) => sink.record(event)));
+    // Auditing is best-effort: a failing sink must never change a run's outcome.
+    await Promise.allSettled(this.sinks.map(async (sink) => sink.record(event)));
   }
 }
 
