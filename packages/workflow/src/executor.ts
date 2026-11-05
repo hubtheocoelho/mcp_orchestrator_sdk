@@ -150,6 +150,7 @@ export class WorkflowExecutor {
         if (context.checkpointStore) {
           await context.checkpointStore.save({
             workflowId: definition.id,
+            runId,
             stepIndex: i + 1,
             state: JSON.parse(JSON.stringify(scope)),
             timestamp: Date.now(),
@@ -179,6 +180,7 @@ export class WorkflowExecutor {
         if (context.checkpointStore) {
           await context.checkpointStore.save({
             workflowId: definition.id,
+            runId,
             stepIndex: i,
             state: JSON.parse(JSON.stringify(scope)),
             timestamp: Date.now(),
@@ -215,6 +217,10 @@ export class WorkflowExecutor {
       error: failure,
     };
 
+    if (!hardFailure && context.checkpointStore) {
+      await context.checkpointStore.clear(definition.id, runId);
+    }
+
     await this.emit({ type: "run-complete", runId, result, at: Date.now() });
     if (failure) {
       notify(context, {
@@ -234,21 +240,23 @@ export class WorkflowExecutor {
   }
 
   /**
-   * Resume workflow execution from the last saved checkpoint in `checkpointStore`.
+   * Resume a run from its checkpoint in `checkpointStore`. Pass `context.runId`
+   * to resume a specific run; otherwise the most recently checkpointed run of
+   * the workflow is resumed (under its original runId).
    */
   async resume(
     definition: WorkflowDefinition,
     checkpointStore: CheckpointStore,
     context: ExecutionContext = {},
   ): Promise<WorkflowResult> {
-    const checkpoint = await checkpointStore.load(definition.id);
+    const checkpoint = await checkpointStore.load(definition.id, context.runId);
     if (!checkpoint) {
       return this.execute(definition, {}, { ...context, checkpointStore });
     }
     return this.execute(
       definition,
       checkpoint.state.input,
-      { ...context, checkpointStore },
+      { ...context, runId: checkpoint.runId, checkpointStore },
       checkpoint.stepIndex,
       checkpoint.state,
     );

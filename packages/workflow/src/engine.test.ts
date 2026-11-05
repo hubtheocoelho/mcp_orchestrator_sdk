@@ -614,3 +614,43 @@ test("retry emits step.failed with willRetry before the final attempt", async ()
     ["workflow.started", "step.started", "failed:true", "failed:true", "step.output", "workflow.finished"],
   );
 });
+
+test("checkpoints are per run: concurrent runs do not clobber each other", async () => {
+  const { InMemoryCheckpointStore } = await import("./checkpoint.js");
+  const store = new InMemoryCheckpointStore();
+  const executor = new WorkflowExecutor({
+    tools: {
+      callTool: async (id, params) =>
+        id === "boom" ? { ok: false, error: "x" } : { ok: true, output: params.v ?? id },
+    },
+  });
+  const definition = {
+    id: "per-run",
+    inputs: {},
+    steps: [
+      { id: "a", tool: "ok", params: { v: "${input.v}" }, on_failure: "fail" as const },
+      { id: "b", tool: "boom", params: {}, on_failure: "fail" as const },
+    ],
+    outputs: {},
+  };
+  await Promise.all([
+    executor.execute(definition, { v: "one" }, { runId: "r1", checkpointStore: store }),
+    executor.execute(definition, { v: "two" }, { runId: "r2", checkpointStore: store }),
+  ]);
+  assert.equal((await store.load("per-run", "r1"))?.state.steps.a?.output, "one");
+  assert.equal((await store.load("per-run", "r2"))?.state.steps.a?.output, "two");
+});
+
+test("a successful run clears its checkpoint", async () => {
+  const { InMemoryCheckpointStore } = await import("./checkpoint.js");
+  const store = new InMemoryCheckpointStore();
+  const executor = new WorkflowExecutor({ tools: { callTool: async () => ({ ok: true, output: 1 }) } });
+  const result = await executor.execute(
+    { id: "clean", inputs: {}, steps: [{ id: "a", tool: "t", params: {}, on_failure: "fail" }], outputs: {} },
+    {},
+    { runId: "r", checkpointStore: store },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(await store.load("clean", "r"), null);
+});
+
