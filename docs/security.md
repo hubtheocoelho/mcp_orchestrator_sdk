@@ -74,10 +74,10 @@ Progress notifications (`notifications/progress`) arrive asynchronously:
 
 ## Known limitations
 
-- **Filesystem sandbox is lexical.** It compares resolved path strings. It does
-  not resolve symlinks, so a symlink inside `baseDir` that points outside it is
-  followed. It also rejects legitimate names that begin with `..` (for example
-  `..notes`). Don't place untrusted symlinks in the sandbox.
+- **Filesystem sandbox checks are not atomic.** Paths are resolved through
+  symlinks before use, but a symlink swapped in between the check and the
+  read/write (TOCTOU) is not detected. Don't let untrusted processes write
+  into the sandbox concurrently.
 - **Expression paths are not filtered.** `${input.__proto__}` and similar
   segments are read (never written). This exposes no data beyond
   standard object prototypes, but a deny-list is planned.

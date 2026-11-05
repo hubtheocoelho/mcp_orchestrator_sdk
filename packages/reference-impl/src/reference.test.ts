@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -20,6 +20,30 @@ test("filesystem tools are sandboxed", async () => {
   const escape = await orchestrator.callTool("filesystem.read_file", { path: "../../etc/hosts" });
   assert.equal(escape.ok, false);
   assert.match(escape.error ?? "", /escapes sandbox/);
+});
+
+test("symlinks pointing outside the sandbox are rejected", async () => {
+  const outside = await mkdtemp(join(tmpdir(), "mcp-outside-"));
+  try {
+    await writeFile(join(outside, "secret.txt"), "secret", "utf8");
+    await symlink(outside, join(root, "link"), "junction");
+    const { orchestrator } = createReferenceOrchestrator({ filesystemRoot: root });
+    const read = await orchestrator.callTool("filesystem.read_file", { path: "link/secret.txt" });
+    assert.equal(read.ok, false);
+    assert.match(read.error ?? "", /escapes sandbox/);
+    const write = await orchestrator.callTool("filesystem.write_file", { path: "link/new.txt", content: "x" });
+    assert.equal(write.ok, false);
+  } finally {
+    await rm(join(root, "link"), { force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("names starting with two dots stay inside the sandbox", async () => {
+  await mkdir(root, { recursive: true });
+  const { orchestrator } = createReferenceOrchestrator({ filesystemRoot: root });
+  const write = await orchestrator.callTool("filesystem.write_file", { path: "..notes", content: "ok" });
+  assert.equal(write.ok, true);
 });
 
 test("a workflow writes then reads a file end to end", async () => {
