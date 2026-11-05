@@ -74,4 +74,18 @@ export class WorkflowEngine {
     if (!definition) throw new WorkflowNotFoundError(workflowId);
     return this.executor.execute(definition, inputs, context ?? {});
   }
+
+  /**
+   * Validate and run an ad-hoc definition without registering it. Used by
+   * `Orchestrator.executeWorkflowStream` so inline steps get the exact same
+   * semantics (when/stop_when, interpolation, policies, parallel) as defined workflows.
+   */
+  async executeDefinition(
+    definition: WorkflowDefinitionInput,
+    inputs: JsonObject = {},
+    context?: ExecutionContext,
+  ): Promise<WorkflowResult> {
+    const parsed = workflowDefinitionSchema.parse(definition);
+    return this.executor.execute(parsed, inputs, context ?? {});
+  }
 }

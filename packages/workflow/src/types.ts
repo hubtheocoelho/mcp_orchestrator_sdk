@@ -1,4 +1,4 @@
-import type { JsonObject, Tracer } from "@mcp-orchestrator/core";
+import type { JsonObject, OrchestratorEvent, Tracer } from "@mcp-orchestrator/core";
 import type { CheckpointStore } from "./checkpoint.js";
 
 /** Outcome of a single step within a workflow run. */
@@ -33,7 +33,12 @@ export interface ToolCaller {
   callTool(
     toolId: string,
     params: JsonObject,
-    options?: { caller?: string; callId?: string; signal?: AbortSignal },
+    options?: {
+      caller?: string;
+      callId?: string;
+      signal?: AbortSignal;
+      onProgress?: (progress: number, message?: string) => void;
+    },
   ): Promise<{ ok: boolean; output?: unknown; error?: string }>;
 }
 
@@ -48,4 +53,10 @@ export interface ExecutionContext {
   tracer?: Tracer;
   /** Optional store for durable execution checkpoints. */
   checkpointStore?: CheckpointStore;
+  /**
+   * Receives a streaming {@link OrchestratorEvent} for every lifecycle
+   * transition (used by `Orchestrator.executeWorkflowStream`/`streamWorkflow`).
+   * Exceptions thrown by the listener are swallowed.
+   */
+  onEvent?: (event: OrchestratorEvent) => void;
 }

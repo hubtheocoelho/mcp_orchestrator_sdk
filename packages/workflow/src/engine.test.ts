@@ -382,9 +382,17 @@ test("parallel steps with onError: continue delivers final result with failure r
   assert.deepEqual(result.outputs.res, ["good_tool_success", undefined]);
 });
 
-test("signal aborts parallel steps and rejects with OrchestratorAbortError", async () => {
+test("signal aborts parallel steps and returns a failed result instead of throwing", async () => {
   const ctrl = new AbortController();
+  const spans: string[] = [];
   const executor = new WorkflowExecutor({
+    tracer: {
+      startSpan: (name) => ({
+        setAttribute: () => {},
+        recordException: () => {},
+        end: () => spans.push(name),
+      }),
+    },
     tools: {
       callTool: async (_id, _params, options) => {
         return new Promise((resolve, reject) => {
@@ -400,28 +408,67 @@ test("signal aborts parallel steps and rejects with OrchestratorAbortError", asy
 
   setTimeout(() => ctrl.abort(), 20);
 
-  await assert.rejects(
-    () =>
-      executor.execute(
-        {
-          id: "parallel-abort",
-          inputs: {},
-          steps: [
-            {
-              id: "p_abort",
-              tool: "t1",
-              parallel: ["t1", "t2"],
-              params: {},
-              on_failure: "fail",
-            },
-          ],
-          outputs: {},
-        },
-        {},
-        { signal: ctrl.signal },
-      ),
-    (err: any) => err.name === "OrchestratorAbortError",
+  const result = await executor.execute(
+    {
+      id: "parallel-abort",
+      inputs: {},
+      steps: [
+        { id: "p_abort", tool: "t1", parallel: ["t1", "t2"], params: {}, on_failure: "fail" },
+        { id: "after", tool: "t1", params: {}, on_failure: "fail" },
+      ],
+      outputs: { x: "${steps.p_abort.output}" },
+    },
+    {},
+    { signal: ctrl.signal },
   );
+
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /aborted/);
+  assert.deepEqual(result.outputs, {});
+  assert.equal(result.steps.length, 1, "no step runs after the abort");
+  assert.deepEqual(spans.sort(), ["workflow.execute", "workflow.step.p_abort"], "all spans are ended");
+});
+
+test("onError: continue keeps outputs even when other steps use the default fail policy", async () => {
+  const executor = new WorkflowExecutor({
+    tools: {
+      callTool: async (id) =>
+        id === "bad" ? { ok: false, error: "boom" } : { ok: true, output: `${id}_ok` },
+    },
+  });
+
+  const result = await executor.execute({
+    id: "mixed-continue",
+    inputs: {},
+    steps: [
+      { id: "a", tool: "bad", params: {}, onError: "continue", on_failure: "fail" },
+      { id: "b", tool: "good", params: {}, on_failure: "fail" },
+    ],
+    outputs: { b: "${steps.b.output}" },
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /Step "a" failed/);
+  assert.deepEqual(result.outputs, { b: "good_ok" });
+});
+
+test("a hard failure after a continue failure still clears outputs", async () => {
+  const executor = new WorkflowExecutor({
+    tools: { callTool: async () => ({ ok: false, error: "boom" }) },
+  });
+
+  const result = await executor.execute({
+    id: "continue-then-fail",
+    inputs: {},
+    steps: [
+      { id: "a", tool: "x", params: {}, onError: "continue", on_failure: "fail" },
+      { id: "b", tool: "x", params: {}, on_failure: "fail" },
+    ],
+    outputs: { a: "${steps.a.output}" },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.outputs, {});
 });
 
 test("workflow that fails on step 3 can be resumed from step 3 with checkpoint", async () => {
@@ -515,4 +562,55 @@ test("onError: 'continue' proceeds and reports failure in final result", async (
   assert.match(result.error ?? "", /Step "s2" failed/);
   assert.equal(result.outputs.first, "step1");
   assert.equal(result.outputs.third, "step3");
+});
+
+test("resume emits workflow.started with resumed/fromStep", async () => {
+  const { InMemoryCheckpointStore } = await import("./checkpoint.js");
+  const store = new InMemoryCheckpointStore();
+  let fail = true;
+  const executor = new WorkflowExecutor({
+    tools: {
+      callTool: async (id) => (id === "flaky" && fail ? { ok: false, error: "x" } : { ok: true, output: id }),
+    },
+  });
+  const definition = {
+    id: "resume-events",
+    inputs: {},
+    steps: [
+      { id: "a", tool: "ok", params: {}, on_failure: "fail" as const },
+      { id: "b", tool: "flaky", params: {}, on_failure: "fail" as const },
+    ],
+    outputs: {},
+  };
+  await executor.execute(definition, {}, { checkpointStore: store });
+  fail = false;
+
+  const events: Array<{ type: string; resumed?: boolean; fromStep?: number }> = [];
+  const result = await executor.resume(definition, store, { onEvent: (e) => events.push(e as never) });
+  assert.equal(result.ok, true);
+  assert.deepEqual(events[0], { type: "workflow.started", workflowId: "resume-events", input: {}, resumed: true, fromStep: 1 });
+  assert.equal(events.at(-1)?.type, "workflow.finished");
+});
+
+test("retry emits step.failed with willRetry before the final attempt", async () => {
+  let calls = 0;
+  const executor = new WorkflowExecutor({
+    tools: { callTool: async () => (++calls < 3 ? { ok: false, error: "flaky" } : { ok: true, output: "ok" }) },
+  });
+  const events: Array<{ type: string; willRetry?: boolean }> = [];
+  const result = await executor.execute(
+    {
+      id: "retry-events",
+      inputs: {},
+      steps: [{ id: "s", tool: "t", params: {}, on_failure: "retry", retry: { max: 3, delayMs: 0 } }],
+      outputs: {},
+    },
+    {},
+    { onEvent: (e) => events.push(e as never) },
+  );
+  assert.equal(result.ok, true);
+  assert.deepEqual(
+    events.map((e) => (e.type === "step.failed" ? `failed:${e.willRetry}` : e.type)),
+    ["workflow.started", "step.started", "failed:true", "failed:true", "step.output", "workflow.finished"],
+  );
 });

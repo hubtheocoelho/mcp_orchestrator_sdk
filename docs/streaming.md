@@ -16,7 +16,7 @@ All events emitted during workflow execution conform to the `OrchestratorEvent` 
 
 ```typescript
 type OrchestratorEvent =
-  | { type: "workflow.started"; workflowId: string; input: unknown }
+  | { type: "workflow.started"; workflowId: string; input: unknown; resumed?: boolean; fromStep?: number }
   | { type: "step.started"; stepName: string; tool?: string }
   | { type: "step.progress"; stepName: string; progress: number; message?: string }
   | { type: "step.output"; stepName: string; output: unknown }
@@ -31,10 +31,18 @@ type OrchestratorEvent =
 
 ### Streaming Workflow Execution
 
-```typescript
-import { Orchestrator } from "@mcp-orchestrator/core";
+Inline steps get the full workflow semantics (`${...}` interpolation, `when`/`stop_when`,
+`on_failure`/`onError`, retries, `parallel`, tracing) when the orchestrator has a
+`WorkflowRunner` that implements `executeDefinition` — `WorkflowEngine` does, and
+`createReferenceOrchestrator` wires it for you. A bare `new Orchestrator()` falls back to a
+minimal sequential runner that only accepts literal params: steps using `when`, `stop_when`
+or `${...}` templates end immediately with `workflow.failed` instead of running with
+un-interpolated values.
 
-const orchestrator = new Orchestrator();
+```typescript
+import { createReferenceOrchestrator } from "@mcp-orchestrator/reference-impl";
+
+const { orchestrator } = createReferenceOrchestrator();
 
 const steps = [
   { id: "fetch", tool: "github.get_issue", params: { issueNumber: 42 } },
@@ -80,9 +88,25 @@ for await (const event of orchestrator.callToolStream("ai.generate_text", { prom
 
 If a tool does not support chunk streaming, a single `tool.chunk` event containing the full result is emitted automatically (degraded but consistent behavior).
 
+### Streaming a Registered Workflow
+
+```typescript
+workflows.define({ id: "triage-issue", inputs: { issue: { type: "number", required: true } }, steps, outputs: {} });
+
+for await (const event of orchestrator.streamWorkflow("triage-issue", { issue: 42 }, { signal })) {
+  // same OrchestratorEvent stream; workflow.finished.result is the declared outputs
+}
+```
+
+A retried step emits `step.failed` with `willRetry: true` for every attempt that will be
+retried. A run resumed from a checkpoint starts with `workflow.started` carrying
+`resumed: true` and `fromStep`.
+
 ## Guarantee of Termination
 
 The asynchronous generator returned by `executeWorkflowStream` is guaranteed to terminate cleanly in all paths:
 - **Success:** ends after yielding `workflow.finished`
 - **Error:** ends immediately after yielding `step.failed` and `workflow.failed`
-- **Cancellation:** ends immediately when `signal.aborted` is detected
+- **Cancellation:** ends immediately when the signal aborts, with `workflow.failed`
+  (`OrchestratorAbortError`) — even if the running tool ignores its `AbortSignal`. The
+  tool's late result is discarded.

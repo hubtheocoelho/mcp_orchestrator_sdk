@@ -302,3 +302,80 @@ test("progress respects signal — abort halts emission and emits workflow.faile
     .map((e) => e.progress);
   assert.ok(!progresses.includes(90), "Should not emit progress after abortion");
 });
+
+// ---------------------------------------------------------------------------
+// Abort wakes the stream even when the tool ignores its signal
+// ---------------------------------------------------------------------------
+
+const hangingTool: ToolDefinition = {
+  id: "hang",
+  description: "Ignores its AbortSignal and resolves after 5s",
+  schema: { type: "object" },
+  execute: () => new Promise((resolve) => setTimeout(() => resolve("late"), 5000).unref()),
+};
+
+test("executeWorkflowStream ends promptly on abort even if the tool ignores the signal", async () => {
+  const orch = new Orchestrator();
+  orch.registerTool(hangingTool);
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(), 20);
+
+  const started = Date.now();
+  const events = await collectStream(
+    orch.executeWorkflowStream("wf-hang", [{ id: "s1", tool: "hang" }], {}, { signal: ctrl.signal }),
+  );
+
+  assert.ok(Date.now() - started < 1000, "stream must not wait for the tool");
+  const last = events.at(-1);
+  assert.equal(last?.type, "workflow.failed");
+  assert.equal((last as Extract<OrchestratorEvent, { type: "workflow.failed" }>).error.name, "OrchestratorAbortError");
+});
+
+test("callToolStream ends promptly on abort even if the tool ignores the signal", async () => {
+  const orch = new Orchestrator();
+  orch.registerTool(hangingTool);
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(), 20);
+
+  const started = Date.now();
+  const events = await collectStream(orch.callToolStream("hang", {}, { signal: ctrl.signal }));
+
+  assert.ok(Date.now() - started < 1000, "stream must not wait for the tool");
+  assert.deepEqual(events.map((e) => e.type), ["tool.chunk"]);
+  assert.deepEqual((events[0] as any).chunk, { error: "Operation aborted" });
+});
+
+test("executeWorkflowStream without a workflow runner rejects when/templates instead of ignoring them", async () => {
+  const orch = new Orchestrator();
+  orch.registerTool(echo);
+
+  for (const step of [
+    { id: "s1", tool: "echo", params: { message: "${input.x}" } as JsonObject },
+    { id: "s1", tool: "echo", params: { message: "x" } as JsonObject, when: "${input.go}" },
+  ]) {
+    const events = await collectStream(orch.executeWorkflowStream("wf", [step], { x: "hi" }));
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.type, "workflow.failed");
+    assert.match((events[0] as any).error.message, /WorkflowRunner/);
+  }
+});
+
+test("executeWorkflowStream delegates to WorkflowRunner.executeDefinition when available", async () => {
+  let received: unknown;
+  const orch = new Orchestrator({
+    workflows: {
+      execute: async () => undefined,
+      executeDefinition: async (definition, _inputs, context) => {
+        received = definition;
+        const ctx = context as { onEvent: (e: OrchestratorEvent) => void };
+        ctx.onEvent({ type: "workflow.started", workflowId: "wf", input: {} });
+        ctx.onEvent({ type: "workflow.finished", workflowId: "wf", result: 42 });
+        return { ok: true };
+      },
+    },
+  });
+
+  const events = await collectStream(orch.executeWorkflowStream("wf", [{ id: "s1", tool: "echo" }], {}));
+  assert.deepEqual(events.map((e) => e.type), ["workflow.started", "workflow.finished"]);
+  assert.deepEqual((received as any).steps, [{ id: "s1", tool: "echo" }]);
+});

@@ -12,6 +12,9 @@ import { ToolRegistry, type ExecuteOptions, type ToolProvider } from "./tool-reg
 import type { Agent, AgentConfig, JsonObject, Tool, ToolDefinition, ToolResult } from "./types.js";
 import type { OrchestratorEvent } from "./orchestrator-event.js";
 import { NoopTracer, type Tracer } from "./tracing.js";
+import { OrchestratorAbortError, pumpEvents } from "./event-pump.js";
+
+export { OrchestratorAbortError } from "./event-pump.js";
 
 /**
  * Minimal structural view of a state backend the orchestrator can delegate to.
@@ -27,6 +30,33 @@ export interface StateAccess {
 /** Minimal structural view of a workflow runtime the orchestrator can delegate to. */
 export interface WorkflowRunner {
   execute(workflowId: string, inputs: JsonObject, context?: unknown): Promise<unknown>;
+  /**
+   * Optional: validate and run an ad-hoc definition (`{ id, steps, inputs, outputs }`).
+   * When present, `executeWorkflowStream` delegates to it so inline steps get
+   * the full workflow semantics. `WorkflowEngine` implements it.
+   */
+  executeDefinition?(definition: unknown, inputs: JsonObject, context?: unknown): Promise<unknown>;
+}
+
+/**
+ * Context handed to a {@link WorkflowRunner} by the streaming APIs. Runners
+ * that support streaming (e.g. `WorkflowEngine`) call `onEvent` for every
+ * lifecycle transition.
+ */
+export interface WorkflowStreamContext {
+  signal?: AbortSignal;
+  caller?: string;
+  onEvent: (event: OrchestratorEvent) => void;
+}
+
+/** An inline step accepted by {@link Orchestrator.executeWorkflowStream}. */
+export interface InlineWorkflowStep {
+  id: string;
+  tool: string;
+  params?: JsonObject;
+  when?: string;
+  stop_when?: string;
+  [key: string]: unknown;
 }
 
 /** Structural view of a provider offering prompts (e.g. McpClient). */
@@ -48,7 +78,7 @@ export interface OrchestratorOptions {
   auditSinks?: AuditSink[];
   state?: StateAccess;
   workflows?: WorkflowRunner;
-  tracer?: import("./tracing.js").Tracer;
+  tracer?: Tracer;
   samplingHandler?: (req: unknown) => Promise<unknown>;
 }
 
@@ -63,14 +93,6 @@ export class ToolNotAllowedError extends Error {
   }
 }
 
-/** Thrown when an operation is aborted via AbortSignal. */
-export class OrchestratorAbortError extends Error {
-  constructor(message = "Operation aborted") {
-    super(message);
-    this.name = "OrchestratorAbortError";
-  }
-}
-
 /**
  * The main orchestration engine. It composes the tool and agent registries with
  * the hook manager and optional state / workflow backends, and provides the
@@ -81,7 +103,7 @@ export class Orchestrator {
   readonly tools: ToolRegistry;
   readonly agents: AgentRegistry;
   readonly hooks: HookManager;
-  readonly tracer: import("./tracing.js").Tracer;
+  readonly tracer: Tracer;
   readonly samplingHandler?: (req: unknown) => Promise<unknown>;
 
   private readonly state?: StateAccess;
@@ -216,58 +238,50 @@ export class Orchestrator {
   // --- Streaming tool execution -------------------------------------------
 
   /**
-   * Streaming version of callTool. Emits tool.chunk events for each chunk.
-   * For tools that do not support streaming, a single chunk with the full
-   * result is emitted (degraded but consistent behavior).
+   * Streaming version of callTool. Emits `step.progress` for reported progress,
+   * then `tool.chunk` events: one per chunk for async-iterable outputs, or a
+   * single chunk with the full result (or `{ error }`) otherwise. Aborting the
+   * signal ends the stream immediately with an `{ error }` chunk, even if the
+   * tool ignores the signal.
    */
   async *callToolStream(
     toolId: string,
     params: JsonObject,
     options: ExecuteOptions = {},
   ): AsyncGenerator<OrchestratorEvent> {
-    const progressQueue: Array<{ progress: number; message?: string }> = [];
-    let notify: (() => void) | undefined;
-
-    const callPromise = this.callTool(toolId, params, {
-      ...options,
-      onProgress: (progress, message) => {
-        progressQueue.push({ progress, message });
-        notify?.();
-      },
+    const abortChunk = (): OrchestratorEvent => ({
+      type: "tool.chunk",
+      toolName: toolId,
+      chunk: { error: new OrchestratorAbortError().message },
     });
-
-    let done = false;
-    let result: ToolResult | undefined;
-    callPromise.then(
-      (res) => {
-        done = true;
-        result = res;
-        notify?.();
-      },
-      (err) => {
-        done = true;
-        result = { callId: options.callId ?? "", toolId, ok: false, error: err?.message ?? String(err), durationMs: 0 };
-        notify?.();
-      },
-    );
-
-    while (!done || progressQueue.length > 0) {
-      if (options.signal?.aborted) break;
-      if (progressQueue.length > 0) {
-        const p = progressQueue.shift()!;
-        yield { type: "step.progress", stepName: toolId, progress: p.progress, message: p.message };
-      } else if (!done) {
-        await new Promise<void>((resolve) => {
-          notify = resolve;
-        });
-      }
+    if (options.signal?.aborted) {
+      yield abortChunk();
+      return;
     }
 
-    const finalResult = result ?? (await callPromise);
+    let finalResult: ToolResult | undefined;
+    yield* pumpEvents(
+      async (emit) => {
+        finalResult = await this.callTool(toolId, params, {
+          ...options,
+          onProgress: (progress, message) => {
+            options.onProgress?.(progress, message);
+            emit({ type: "step.progress", stepName: toolId, progress, message });
+          },
+        });
+      },
+      { signal: options.signal, onAbort: abortChunk },
+    );
+    if (options.signal?.aborted || !finalResult) return;
+
     if (finalResult.ok) {
-      const output = finalResult.output as any;
-      if (output && typeof output[Symbol.asyncIterator] === "function") {
-        for await (const chunk of output) {
+      const output = finalResult.output as unknown;
+      if (output && typeof (output as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function") {
+        for await (const chunk of output as AsyncIterable<unknown>) {
+          if (options.signal?.aborted) {
+            yield abortChunk();
+            return;
+          }
           yield { type: "tool.chunk", toolName: toolId, chunk };
         }
       } else {
@@ -281,149 +295,133 @@ export class Orchestrator {
   // --- Streaming workflow execution ---------------------------------------
 
   /**
-   * Streaming version of executeWorkflow. Yields OrchestratorEvent for every
-   * lifecycle transition. The caller can consume these events to drive a UI,
-   * log progress, or pipe them to an SSE endpoint.
+   * Stream a workflow **registered** on the configured {@link WorkflowRunner}
+   * (e.g. `WorkflowEngine`). Yields an {@link OrchestratorEvent} for every
+   * lifecycle transition; always ends with `workflow.finished` or
+   * `workflow.failed`, including on abort.
+   */
+  async *streamWorkflow(
+    workflowId: string,
+    inputs: JsonObject = {},
+    options: { signal?: AbortSignal; caller?: string } = {},
+  ): AsyncGenerator<OrchestratorEvent> {
+    const runner = this.workflows;
+    if (!runner) {
+      yield {
+        type: "workflow.failed",
+        workflowId,
+        error: new Error("No workflow runner configured on this orchestrator"),
+      };
+      return;
+    }
+    if (options.signal?.aborted) {
+      yield { type: "workflow.failed", workflowId, error: new OrchestratorAbortError() };
+      return;
+    }
+    yield* pumpEvents(
+      (onEvent) => {
+        const context: WorkflowStreamContext = { signal: options.signal, caller: options.caller, onEvent };
+        return runner.execute(workflowId, inputs, context);
+      },
+      { signal: options.signal, workflowId },
+    );
+  }
+
+  /**
+   * Stream an ad-hoc list of steps.
    *
-   * The existing `executeWorkflow` method is left completely intact; this is
-   * a new, additive API that operates on the same WorkflowRunner.
+   * When the configured {@link WorkflowRunner} implements `executeDefinition`
+   * (e.g. `WorkflowEngine`), the steps run through it and get the full
+   * workflow semantics: `${...}` interpolation, `when`/`stop_when`,
+   * `on_failure`/`onError`, retries, `parallel`, tracing.
    *
-   * @param workflowId   Identifier of the workflow (used for events only).
-   * @param steps        Array of step descriptors `{ id, tool, params?, when?, stop_when? }`.
-   * @param input        Workflow-level input data.
+   * Without such a runner a minimal sequential runner is used, which supports
+   * only literal params; steps using `when`, `stop_when` or `${...}` templates
+   * fail fast with `workflow.failed` instead of being silently mis-executed.
+   *
+   * @param workflowId   Identifier of the workflow (used in events).
+   * @param steps        Step descriptors `{ id, tool, params?, ... }`.
+   * @param input        Workflow-level input data (`${input.*}`).
    * @param options      Execution options including optional `signal` for cancellation.
    */
   async *executeWorkflowStream(
     workflowId: string,
-    steps: ReadonlyArray<{
-      id: string;
-      tool: string;
-      params?: JsonObject;
-      when?: string;
-      stop_when?: string;
-    }>,
+    steps: ReadonlyArray<InlineWorkflowStep>,
     input: JsonObject,
-    options: ExecuteOptions & { signal?: AbortSignal } = {},
+    options: ExecuteOptions = {},
   ): AsyncGenerator<OrchestratorEvent> {
     const { signal } = options;
-
-    // Helper: check if we've been aborted and emit the right events.
-    const checkAbort = (): OrchestratorEvent | undefined => {
-      if (signal?.aborted) {
-        return {
-          type: "workflow.failed",
-          workflowId,
-          error: new OrchestratorAbortError(),
-        };
-      }
-      return undefined;
-    };
-
-    // Guard: already aborted before we even start
-    const preAbort = checkAbort();
-    if (preAbort) {
-      yield preAbort;
+    if (signal?.aborted) {
+      yield { type: "workflow.failed", workflowId, error: new OrchestratorAbortError() };
       return;
     }
 
-    yield { type: "workflow.started", workflowId, input };
-
-    const scope: Record<string, any> = { input, steps: {} };
-    let lastOutput: unknown = undefined;
-
-    for (const step of steps) {
-      // Check cancellation between steps
-      const abortEvent = checkAbort();
-      if (abortEvent) {
-        yield abortEvent;
-        return;
-      }
-
-      yield { type: "step.started", stepName: step.id, tool: step.tool };
-
-      const progressQueue: Array<{ progress: number; message?: string }> = [];
-      let notifyProgress: (() => void) | undefined;
-
-      const callPromise = this.callTool(
-        step.tool,
-        step.params ?? ({} as JsonObject),
-        {
-          caller: options.caller,
-          callId: options.callId,
-          signal,
-          onProgress: (progress, message) => {
-            progressQueue.push({ progress, message });
-            notifyProgress?.();
-          },
-        } as ExecuteOptions,
-      );
-
-      let toolCompleted = false;
-      let toolResult: ToolResult | undefined;
-      callPromise.then(
-        (res) => {
-          toolCompleted = true;
-          toolResult = res;
-          notifyProgress?.();
+    const runner = this.workflows;
+    if (runner?.executeDefinition) {
+      const run = runner.executeDefinition.bind(runner);
+      const definition = { id: workflowId, inputs: {}, steps, outputs: {} };
+      yield* pumpEvents(
+        (onEvent) => {
+          const context: WorkflowStreamContext = { signal, caller: options.caller, onEvent };
+          return run(definition, input, context);
         },
-        (err) => {
-          toolCompleted = true;
-          toolResult = {
-            callId: options.callId ?? "",
-            toolId: step.tool,
-            ok: false,
-            error: err?.message ?? String(err),
-            durationMs: 0,
-          };
-          notifyProgress?.();
-        },
+        { signal, workflowId },
       );
-
-      while (!toolCompleted || progressQueue.length > 0) {
-        if (signal?.aborted) {
-          const abortErr = new OrchestratorAbortError();
-          yield { type: "step.failed", stepName: step.id, error: abortErr, willRetry: false };
-          yield { type: "workflow.failed", workflowId, error: abortErr };
-          return;
-        }
-
-        if (progressQueue.length > 0) {
-          const p = progressQueue.shift()!;
-          yield {
-            type: "step.progress",
-            stepName: step.id,
-            progress: p.progress,
-            message: p.message,
-          };
-        } else if (!toolCompleted) {
-          await new Promise<void>((resolve) => {
-            notifyProgress = resolve;
-          });
-        }
-      }
-
-      const finalResult = toolResult!;
-
-      if (signal?.aborted) {
-        const abortErr = new OrchestratorAbortError();
-        yield { type: "step.failed", stepName: step.id, error: abortErr, willRetry: false };
-        yield { type: "workflow.failed", workflowId, error: abortErr };
-        return;
-      }
-
-      if (finalResult.ok) {
-        yield { type: "step.output", stepName: step.id, output: finalResult.output };
-        scope.steps[step.id] = { output: finalResult.output };
-        lastOutput = finalResult.output;
-      } else {
-        const err = new Error(finalResult.error ?? "unknown error");
-        yield { type: "step.failed", stepName: step.id, error: err, willRetry: false };
-        yield { type: "workflow.failed", workflowId, error: err };
-        return; // terminate the stream on error
-      }
+      return;
     }
 
-    yield { type: "workflow.finished", workflowId, result: lastOutput };
+    const unsupported = steps.find(
+      (s) =>
+        s.when !== undefined || s.stop_when !== undefined || JSON.stringify(s.params ?? {}).includes("${"),
+    );
+    if (unsupported) {
+      yield {
+        type: "workflow.failed",
+        workflowId,
+        error: new Error(
+          `Step "${unsupported.id}" uses when/stop_when or \${...} templates, which need a ` +
+            "WorkflowRunner with executeDefinition (e.g. WorkflowEngine) configured as `workflows`",
+        ),
+      };
+      return;
+    }
+
+    yield* pumpEvents((emit) => this.runInlineSteps(workflowId, steps, input, options, emit), {
+      signal,
+      workflowId,
+    });
+  }
+
+  /** Minimal sequential runner used by executeWorkflowStream when no runner can run definitions. */
+  private async runInlineSteps(
+    workflowId: string,
+    steps: ReadonlyArray<InlineWorkflowStep>,
+    input: JsonObject,
+    options: ExecuteOptions,
+    emit: (event: OrchestratorEvent) => void,
+  ): Promise<void> {
+    emit({ type: "workflow.started", workflowId, input });
+    let lastOutput: unknown;
+    for (const step of steps) {
+      if (options.signal?.aborted) return; // the pump yields the abort event
+      emit({ type: "step.started", stepName: step.id, tool: step.tool });
+      const result = await this.callTool(step.tool, step.params ?? {}, {
+        caller: options.caller,
+        signal: options.signal,
+        onProgress: (progress, message) =>
+          emit({ type: "step.progress", stepName: step.id, progress, message }),
+      });
+      if (options.signal?.aborted) return;
+      if (!result.ok) {
+        const error = new Error(result.error ?? "unknown error");
+        emit({ type: "step.failed", stepName: step.id, error, willRetry: false });
+        emit({ type: "workflow.failed", workflowId, error });
+        return;
+      }
+      emit({ type: "step.output", stepName: step.id, output: result.output });
+      lastOutput = result.output;
+    }
+    emit({ type: "workflow.finished", workflowId, result: lastOutput });
   }
 
   // --- Workflows & state (delegated) --------------------------------------
