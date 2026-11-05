@@ -21,6 +21,8 @@ export function resolvePath(path: string, scope: ExpressionScope): unknown {
   let current: unknown = scope;
   for (const segment of segments) {
     if (current == null || typeof current !== "object") return undefined;
+    // Only own properties: `__proto__`, `constructor` etc. never reach prototypes.
+    if (!Object.prototype.hasOwnProperty.call(current, segment)) return undefined;
     current = (current as Record<string, unknown>)[segment];
   }
   return current;

@@ -39,3 +39,12 @@ test("comparison conditions work across types", () => {
   assert.equal(evaluateCondition("${input.name} != \"other\"", scope), true);
   assert.equal(evaluateCondition("${input.count} < 1", scope), false);
 });
+
+test("paths never resolve through object prototypes", () => {
+  const scope = { input: { a: 1 }, steps: {} };
+  assert.equal(resolvePath("input.__proto__", scope), undefined);
+  assert.equal(resolvePath("input.constructor", scope), undefined);
+  assert.equal(resolvePath("input.a.toString", scope), undefined);
+  assert.equal(interpolate("${input.constructor.name}", scope), undefined);
+  assert.equal(resolvePath("input.a", scope), 1);
+});

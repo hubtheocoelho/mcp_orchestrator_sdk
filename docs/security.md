@@ -78,9 +78,6 @@ Progress notifications (`notifications/progress`) arrive asynchronously:
   symlinks before use, but a symlink swapped in between the check and the
   read/write (TOCTOU) is not detected. Don't let untrusted processes write
   into the sandbox concurrently.
-- **Expression paths are not filtered.** `${input.__proto__}` and similar
-  segments are read (never written). This exposes no data beyond
-  standard object prototypes, but a deny-list is planned.
 - **Workflow audit sinks are not isolated.** A throwing sink rejects the run
   (see [workflows.md](workflows.md#audit-trail)).
 
