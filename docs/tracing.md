@@ -64,6 +64,10 @@ const orchestrator = new Orchestrator({
 });
 ```
 
+The orchestrator forwards its tracer to workflow runs started through
+`streamWorkflow` / `executeWorkflowStream`. For runs started directly on the
+engine, pass it there too: `new WorkflowEngine({ tools, tracer })`.
+
 ## Wiring Langfuse
 
 ```typescript
