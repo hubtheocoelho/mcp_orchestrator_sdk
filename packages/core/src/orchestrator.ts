@@ -46,6 +46,8 @@ export interface WorkflowRunner {
 export interface WorkflowStreamContext {
   signal?: AbortSignal;
   caller?: string;
+  /** The orchestrator's tracer, when one is configured. */
+  tracer?: Tracer;
   onEvent: (event: OrchestratorEvent) => void;
 }
 
@@ -342,7 +344,7 @@ export class Orchestrator {
     }
     yield* pumpEvents(
       (onEvent) => {
-        const context: WorkflowStreamContext = { signal: options.signal, caller: options.caller, onEvent };
+        const context: WorkflowStreamContext = { signal: options.signal, caller: options.caller, tracer: this.streamTracer(), onEvent };
         return runner.execute(workflowId, inputs, context);
       },
       { signal: options.signal, workflowId },
@@ -384,7 +386,7 @@ export class Orchestrator {
       const definition = { id: workflowId, inputs: {}, steps, outputs: {} };
       yield* pumpEvents(
         (onEvent) => {
-          const context: WorkflowStreamContext = { signal, caller: options.caller, onEvent };
+          const context: WorkflowStreamContext = { signal, caller: options.caller, tracer: this.streamTracer(), onEvent };
           return run(definition, input, context);
         },
         { signal, workflowId },
@@ -488,6 +490,11 @@ export class Orchestrator {
 
   onAfterToolCall(handler: HookHandler<AfterToolCallPayload>): Subscription {
     return this.hooks.on("afterToolCall", handler);
+  }
+
+  /** The configured tracer, or undefined so a runner falls back to its own. */
+  private streamTracer(): Tracer | undefined {
+    return this.tracer === NoopTracer ? undefined : this.tracer;
   }
 
   private async emitError(scope: string, cause: unknown): Promise<void> {
