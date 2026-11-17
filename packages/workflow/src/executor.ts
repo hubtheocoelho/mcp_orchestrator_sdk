@@ -15,7 +15,13 @@ import {
   type ExpressionScope,
 } from "./expression.js";
 import type { WorkflowDefinition, WorkflowStep } from "./schema.js";
-import type { ExecutionContext, StepResult, ToolCaller, WorkflowResult } from "./types.js";
+import type {
+  ExecutionContext,
+  StepResult,
+  ToolCaller,
+  WorkflowResult,
+  WorkflowSuspension,
+} from "./types.js";
 
 /** Thrown when required inputs are missing or otherwise invalid. */
 export class WorkflowInputError extends Error {
@@ -82,6 +88,8 @@ export class WorkflowExecutor {
     // True when the run stopped because of a failure ("fail"/exhausted "retry"/abort).
     // Failures under the "continue" policy are reported but still resolve outputs.
     let hardFailure = false;
+    let suspended: WorkflowSuspension | undefined;
+    let resumeInput = context.resumeInput;
 
     try {
     for (let i = startIndex; i < definition.steps.length; i++) {
@@ -117,7 +125,36 @@ export class WorkflowExecutor {
 
       let result: StepResult;
       try {
-        result = await this.runStep(step, scope, context, runId);
+        if (step.needs_input) {
+          const provided = resumeInput?.stepId === step.id ? resumeInput.content : undefined;
+          resumeInput = undefined;
+          const outcome = await this.requestInput(step, definition.id, runId, context, provided);
+          if (outcome === "suspend" && context.checkpointStore) {
+            await context.checkpointStore.save({
+              workflowId: definition.id,
+              runId,
+              stepIndex: i,
+              state: JSON.parse(JSON.stringify(scope)),
+              timestamp: Date.now(),
+            });
+            suspended = { stepId: step.id, request: step.needs_input };
+            stepSpan.setAttribute("step.status", "suspended");
+            break;
+          }
+          result =
+            outcome === "suspend"
+              ? {
+                  id: step.id,
+                  toolId: step.tool,
+                  status: "failed",
+                  error: "Step needs input but the run has no checkpointStore to suspend into",
+                  attempts: 1,
+                  durationMs: 0,
+                }
+              : outcome;
+        } else {
+          result = await this.runStep(step, scope, context, runId);
+        }
         stepSpan.setAttribute("step.status", result.status);
         stepSpan.setAttribute("step.duration_ms", result.durationMs);
         if (result.status === "failed" && result.error) {
@@ -205,24 +242,29 @@ export class WorkflowExecutor {
     }
     workflowSpan.end();
 
-    const outputs = hardFailure ? {} : this.resolveOutputs(definition, scope);
+    // A "continue" failure before the pause still reports as a failure, but the
+    // run stays suspended (checkpoint kept) so it can be resumed.
+    const outputs = hardFailure || suspended ? {} : this.resolveOutputs(definition, scope);
 
     const result: WorkflowResult = {
       workflowId: definition.id,
       runId,
-      ok: !failure,
+      ok: !failure && !suspended,
       outputs,
       steps,
       durationMs: Date.now() - startedAt,
       error: failure,
+      ...(suspended ? { suspended } : {}),
     };
 
-    if (!hardFailure && context.checkpointStore) {
+    if (!hardFailure && !suspended && context.checkpointStore) {
       await context.checkpointStore.clear(definition.id, runId);
     }
 
     await this.emit({ type: "run-complete", runId, result, at: Date.now() });
-    if (failure) {
+    if (suspended) {
+      // No terminal event: the run is paused, not finished.
+    } else if (failure) {
       notify(context, {
         type: "workflow.failed",
         workflowId: definition.id,
@@ -260,6 +302,40 @@ export class WorkflowExecutor {
       checkpoint.stepIndex,
       checkpoint.state,
     );
+  }
+
+  /** Resolve a `needs_input` step: resume input first, then the provider, else suspend. */
+  private async requestInput(
+    step: WorkflowStep,
+    workflowId: string,
+    runId: string,
+    context: ExecutionContext,
+    provided: JsonObject | undefined,
+  ): Promise<StepResult | "suspend"> {
+    const startedAt = Date.now();
+    const finish = (status: "success" | "failed", extra: { output?: JsonObject; error?: string }): StepResult => ({
+      id: step.id,
+      toolId: step.tool,
+      status,
+      ...extra,
+      attempts: 1,
+      durationMs: Date.now() - startedAt,
+    });
+    if (provided) return finish("success", { output: provided });
+    if (!context.inputProvider) return "suspend";
+    try {
+      const response = await context.inputProvider(step.needs_input!, {
+        workflowId,
+        runId,
+        stepId: step.id,
+        signal: context.signal,
+      });
+      if (response.action === "suspend") return "suspend";
+      if (response.action === "accept") return finish("success", { output: response.content });
+      return finish("failed", { error: `Input ${response.action === "decline" ? "declined" : "cancelled"}` });
+    } catch (err) {
+      return finish("failed", { error: (err as Error)?.message ?? String(err) });
+    }
   }
 
   private async runStep(

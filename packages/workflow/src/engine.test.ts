@@ -696,3 +696,56 @@ test("a failing workflow audit sink does not break the run", async () => {
   });
   assert.equal(result.ok, true);
 });
+
+test("needs_input suspends the run, keeps its checkpoint, and resumes with the input", async () => {
+  const { InMemoryCheckpointStore } = await import("./checkpoint.js");
+  const engine = new WorkflowEngine({ tools: orchestratorWithTools(upper) });
+  engine.define({
+    id: "ask",
+    steps: [
+      { id: "q", needs_input: { message: "Name?" } },
+      { id: "up", tool: "str.upper", params: { text: "${steps.q.output.value}" } },
+    ],
+    outputs: { name: "${steps.up.output}" },
+  });
+  const store = new InMemoryCheckpointStore();
+
+  const paused = await engine.execute("ask", {}, { checkpointStore: store });
+  assert.equal(paused.ok, false);
+  assert.equal(paused.error, undefined);
+  assert.deepEqual(paused.suspended, { stepId: "q", request: { message: "Name?" } });
+  assert.equal((await store.load("ask", paused.runId))?.stepIndex, 0);
+
+  const done = await engine.resume("ask", paused.runId, store, {
+    resumeInput: { stepId: "q", content: { value: "ana" } },
+  });
+  assert.equal(done?.ok, true);
+  assert.deepEqual(done?.outputs, { name: "ANA" });
+  assert.equal(await store.load("ask", paused.runId), null);
+  assert.equal(await engine.resume("ask", paused.runId, store), null);
+});
+
+test("needs_input uses the inputProvider in-line, and fails without a checkpoint store", async () => {
+  const engine = new WorkflowEngine({ tools: orchestratorWithTools(upper) });
+  engine.define({
+    id: "ask",
+    steps: [
+      { id: "q", needs_input: { message: "Name?" } },
+      { id: "up", tool: "str.upper", params: { text: "${steps.q.output.value}" } },
+    ],
+    outputs: { name: "${steps.up.output}" },
+  });
+  const live = await engine.execute("ask", {}, {
+    inputProvider: async () => ({ action: "accept", content: { value: "bo" } }),
+  });
+  assert.deepEqual(live.outputs, { name: "BO" });
+
+  const noStore = await engine.execute("ask");
+  assert.equal(noStore.ok, false);
+  assert.match(noStore.error ?? "", /checkpointStore/);
+});
+
+test("a step needs a tool or needs_input", () => {
+  const engine = new WorkflowEngine({ tools: orchestratorWithTools() });
+  assert.equal(engine.validate({ id: "x", steps: [{ id: "s" }] }).ok, false);
+});

@@ -1,5 +1,6 @@
 import type { JsonObject, OrchestratorEvent, Tracer } from "@mcp-orchestrator/core";
 import type { CheckpointStore } from "./checkpoint.js";
+import type { InputRequest } from "./schema.js";
 
 /** Outcome of a single step within a workflow run. */
 export interface StepResult {
@@ -23,7 +24,40 @@ export interface WorkflowResult {
   readonly durationMs: number;
   /** Present when the run failed. */
   readonly error?: string;
+  /**
+   * Present when the run paused at a `needs_input` step: `ok` is false and
+   * `error` is absent. The checkpoint is kept so the run can be resumed with
+   * `context.resumeInput`.
+   */
+  readonly suspended?: WorkflowSuspension;
 }
+
+/** Where and why a run paused waiting for input. */
+export interface WorkflowSuspension {
+  readonly stepId: string;
+  readonly request: InputRequest;
+}
+
+/** What an {@link InputProvider} answered. */
+export type InputResponse =
+  | { readonly action: "accept"; readonly content: JsonObject }
+  | { readonly action: "decline" | "cancel" }
+  /** Stop the run here and keep its checkpoint, to be resumed later. */
+  | { readonly action: "suspend" };
+
+/**
+ * Answers `needs_input` steps while the run is live (e.g. through MCP
+ * elicitation). Without one, such steps suspend the run.
+ */
+export type InputProvider = (
+  request: InputRequest,
+  info: {
+    readonly workflowId: string;
+    readonly runId: string;
+    readonly stepId: string;
+    readonly signal?: AbortSignal;
+  },
+) => Promise<InputResponse>;
 
 /**
  * The minimal tool-calling surface the executor needs. Core's Orchestrator
@@ -59,4 +93,11 @@ export interface ExecutionContext {
    * Exceptions thrown by the listener are swallowed.
    */
   onEvent?: (event: OrchestratorEvent) => void;
+  /** Answers `needs_input` steps in-line; when absent such steps suspend the run. */
+  inputProvider?: InputProvider;
+  /**
+   * Input for the `needs_input` step a run resumes at. Used once, and only when
+   * `stepId` is the first `needs_input` step reached.
+   */
+  resumeInput?: { readonly stepId: string; readonly content: JsonObject };
 }

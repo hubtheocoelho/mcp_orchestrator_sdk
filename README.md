@@ -59,7 +59,8 @@ npm test
 
 - **Decoupled** — each layer can be replaced or extended independently.
 - **Type-safe** — TypeScript + Zod across the whole pipeline.
-- **Transport-agnostic** — MCPs over any transport (in-process, stdio, HTTP, …).
+- **Transport-agnostic** — MCPs over any transport you implement (in-process and a REST `HttpTransport` ship).
+- **Workflows as MCP tools** — `@mcp-orchestrator/mcp-server` serves workflows over stdio or streamable HTTP via the official MCP SDK.
 - **Composable** — workflows and agents are first-class, declarative values.
 - **Observable** — structured audit trails for every tool and workflow call.
 
@@ -70,7 +71,7 @@ npm test
 | [Getting started](docs/getting-started.md) | Install, first orchestrator, hooks, agents, workflows, MCP |
 | [Streaming](docs/streaming.md) | Real-time event streams (`executeWorkflowStream`, `callToolStream`) |
 | [Tracing & Observability](docs/tracing.md) | Pluggable tracer interfaces, OpenTelemetry & Langfuse integration |
-| [MCP Features](docs/mcp-features.md) | Tools, Resources, Prompts, Progress, Sampling & Roots |
+| [MCP Features](docs/mcp-features.md) | Workflows as MCP tools (elicitation / suspend-resume), client API surface |
 | [Migration guide](docs/migration.md) | Upgrading to Runtime 2026 side-by-side |
 | [Architecture](docs/architecture.md) | Package graph, layers and design principles |
 | [Workflow reference](docs/workflows.md) | Definition format, expression syntax, runtime semantics |

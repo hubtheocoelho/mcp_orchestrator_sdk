@@ -2,6 +2,12 @@
 
 Transport-agnostic MCP (Model Context Protocol) access for the orchestrator.
 
+> **Not wire-compatible with the official MCP protocol.** This package has no
+> JSON-RPC framing, `initialize` handshake or stdio transport, and
+> `HttpTransport` uses its own REST contract. To expose workflows to MCP
+> clients, use [`@mcp-orchestrator/mcp-server`](../mcp-server), which is built
+> on the official SDK.
+
 ## Install
 
 ```bash
@@ -12,7 +18,7 @@ npm install @mcp-orchestrator/mcp @mcp-orchestrator/core
 
 - **`McpTransport`** — the only thing that knows *how* a server is reached. The
   client and pool are written entirely against this interface, so adding a new
-  transport (stdio, HTTP, WebSocket, …) requires no changes elsewhere.
+  transport requires no changes elsewhere (none for stdio ships today).
 - **`InMemoryTransport`** — a ready in-process transport for tests and embedding
   MCP-style servers without spawning anything.
 - **`McpClient`** — implements core's `ToolProvider`. It exposes each remote tool
