@@ -1,0 +1,27 @@
+{
+  "name": "@mcp-orchestrator/mcp-server",
+  "version": "0.1.0",
+  "description": "Expose workflows as tools of an official-protocol MCP server (stdio and streamable HTTP)",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@mcp-orchestrator/core": "0.1.0",
+    "@mcp-orchestrator/workflow": "0.1.0",
+    "@modelcontextprotocol/sdk": "^1.32.2"
+  }
+}

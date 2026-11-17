@@ -5,6 +5,7 @@
     { "path": "packages/mcp" },
     { "path": "packages/state" },
     { "path": "packages/workflow" },
+    { "path": "packages/mcp-server" },
     { "path": "packages/reference-impl" },
     { "path": "examples" }
   ]

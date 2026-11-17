@@ -1,5 +1,6 @@
 import { err, ok, type JsonObject, type Result, type Tracer, type ValidationError } from "@mcp-orchestrator/core";
 import type { WorkflowAuditSink } from "./audit.js";
+import type { CheckpointStore } from "./checkpoint.js";
 import { WorkflowExecutor } from "./executor.js";
 import {
   workflowDefinitionSchema,
@@ -79,6 +80,22 @@ export class WorkflowEngine {
     const definition = this.definitions.get(workflowId);
     if (!definition) throw new WorkflowNotFoundError(workflowId);
     return this.executor.execute(definition, inputs, context ?? {});
+  }
+
+  /**
+   * Resume a suspended (or failed) run from its checkpoint. Returns `null`
+   * when the store holds no checkpoint for that run.
+   */
+  async resume(
+    workflowId: string,
+    runId: string,
+    checkpointStore: CheckpointStore,
+    context: ExecutionContext = {},
+  ): Promise<WorkflowResult | null> {
+    const definition = this.definitions.get(workflowId);
+    if (!definition) throw new WorkflowNotFoundError(workflowId);
+    if (!(await checkpointStore.load(workflowId, runId))) return null;
+    return this.executor.resume(definition, checkpointStore, { ...context, runId });
   }
 
   /**
